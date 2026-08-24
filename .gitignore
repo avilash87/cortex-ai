@@ -1,0 +1,66 @@
+# Terraform working directories and local state
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.plan
+crash.log
+crash.*.log
+
+# Terraform variable files may contain credentials or environment-specific values
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+
+# Local Terraform and provider credentials
+.terraformrc
+terraform.rc
+credentials.tfrc.json
+*.pem
+*.key
+*.pfx
+*.p12
+
+# Local secrets and environment configuration
+.env
+.env.*
+!.env.example
+*.secret
+secrets/
+
+# Generated keys, certificates, and WireGuard client profiles
+*.pub
+*.crt
+!docker-compose.yml
+!**/docker-compose.yml
+wireguard/
+**/wireguard/*.conf
+
+# Local build and test output
+dist/
+build/
+coverage/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+*.egg-info/
+__pycache__/
+
+# Local Kubernetes and Helm output
+*.kubeconfig
+kubeconfig
+helm-chart-*.tgz
+
+# Editors and operating-system files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Downloaded CLI binaries
+/kubectl
+/helm
+/azcopy
