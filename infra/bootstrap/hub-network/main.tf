@@ -182,7 +182,8 @@ resource "azurerm_consumption_budget_subscription" "poc" {
   time_grain = "Monthly"
 
   time_period {
-    start_date = formatdate("YYYY-MM-01", timestamp())
+    # timestamp() returns "2026-08-24T..." — substr gives "2026-08", then we pin to the 1st
+    start_date = "${substr(timestamp(), 0, 7)}-01T00:00:00Z"
   }
 
   notification {

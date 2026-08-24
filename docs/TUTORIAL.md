@@ -12,13 +12,13 @@ section — only add to it if we revisit that topic later.
 - [Phase 0d — Bank-scale landing zone: full MG hierarchy + hub-and-spoke networking](#phase-0d)
 - Phase 1 — Networking (not started)
 - Phase 2 — IAM (not started)
-- Phase 3 — VM, SSH key, Key Vault, ACR, Nexus (not started)
+- Phase 3 — VM, SSH key, Key Vault, ACR, Nexus, WireGuard (not started)
 - Phase 4 — Docker (not started)
-- Phase 5 — GitHub Actions CI (not started)
-- Phase 6 — AKS + Helm (not started)
+- Phase 5 — GitHub Actions CI/CD (not started)
+- Phase 6 — AKS + Helm + container policy (not started)
 - Phase 7 — Entra SSO + client-credentials flow (not started)
 - Phase 8 — Foundry + Guardrails + APIM (not started)
-- Phase 9 — Private endpoints (not started)
+- Phase 9 — Private endpoints + Firewall + WAF + VPN Gateway (not started)
 - Phase 10 — Observability (not started)
 - Phase 11 — Teardown + summary (not started)
 
@@ -366,3 +366,399 @@ For the POC we run Nexus OSS via Docker Compose on the same VM in
    private DNS name, given the DNS resolver is only in the hub?
 2. You have Azure Firewall in the hub but spoke-to-spoke traffic is still
    flowing directly. What configuration step is missing?
+
+---
+
+## Phase 0 — Complete: What We Actually Built End-to-End
+
+> This section covers everything that happened across Phase 0a–0d in
+> execution order: what the goal was, what we coded, gotchas we hit and
+> why, and the resulting live state. Read this before Phase 1.
+
+---
+
+### The full picture in one diagram
+
+```
+GitHub repo (avilash87/cortex-ai)   ← your source of truth
+  │
+  ├─ infra/bootstrap/tfc-cloud-setup/   ← LOCAL state (chicken-and-egg)
+  │     ↓ terraform apply
+  │     ├── Entra ID App Registrations: cortex-ai-tfc-dev, cortex-ai-tfc-test
+  │     ├── Federated Identity Credentials (plan + apply × 2 workspaces)
+  │     ├── Contributor role on subscription (scoped)
+  │     ├── TFC workspaces cortex-ai-dev / cortex-ai-test (VCS-driven, auto-apply OFF)
+  │     ├── TFC workspace env vars (TFC_AZURE_PROVIDER_AUTH, ARM_*, etc.)
+  │     └── GitHub OAuth VCS connection (HCP Terraform ↔ GitHub)
+  │
+  ├─ infra/bootstrap/management-group/  ← LOCAL state
+  │     ↓ terraform apply
+  │     ├── 10 management groups (full CAF hierarchy)
+  │     ├── Subscription under mg-cortex-corp
+  │     └── rg-cortex-ai-dev, rg-cortex-ai-test (landing zone RGs)
+  │
+  ├─ infra/bootstrap/hub-network/       ← LOCAL state
+  │     ↓ terraform apply
+  │     ├── vnet-hub-cortex-dev (10.0.0.0/16)
+  │     ├── 3 spoke VNets: ai / data / sandbox
+  │     ├── Hub ↔ spoke VNet peerings (bidirectional)
+  │     ├── Azure DNS Private Resolver + inbound endpoint
+  │     ├── rg-cortex-management-dev (empty shell for Phase 10)
+  │     └── £50/month subscription budget with 80% + forecast alerts
+  │
+  └─ infra/envs/dev/   ← TFC REMOTE state (cortex-ai-dev workspace)
+        ↓ terraform plan (runs in TFC)
+        Empty plan — no Azure auth errors = OIDC wired correctly ✓
+```
+
+---
+
+### Why three separate local-state bootstraps?
+
+**The chicken-and-egg problem:** Normal Terraform uses TFC as the state backend.
+But TFC needs Azure credentials to do anything, the Azure credentials need an
+Entra app registration, and creating Entra objects *requires* Terraform to run
+first. You can't put the thing that creates the backend *inside* the backend.
+
+Solution: three small configs that run with **local state** authenticated by your
+own `az login` session, and whose job is to create everything that the main TFC
+workspaces depend on. Once done, the main workspaces take over for all future
+Terraform work.
+
+```
+infra/bootstrap/            ← local state, run once manually by a human
+  tfc-cloud-setup/          ← creates the TFC workspaces + Azure OIDC trust
+  management-group/         ← creates the MG hierarchy + landing zone RGs
+  hub-network/              ← creates hub+spoke networking + DNS + budget
+
+infra/envs/dev|test/        ← remote state (TFC), where Phases 1-11 land
+```
+
+---
+
+### tfc-cloud-setup — what it creates and why each piece exists
+
+```hcl
+# 1. Entra app registration — defines Cortex AI TFC as an "application" in Entra ID
+resource "azuread_application" "tfc" { for_each = var.envs ... }
+
+# 2. Service principal — the runnable identity attached to the app registration
+resource "azuread_service_principal" "tfc" { ... }
+
+# 3. Federated credential — the OIDC trust statement
+#    "Trust tokens from app.terraform.io for THIS workspace, THIS run phase"
+resource "azuread_application_federated_identity_credential" "plan" {
+  subject = "organization:avilashj:project:Default Project:workspace:cortex-ai-dev:run_phase:plan"
+  issuer  = "https://app.terraform.io"
+}
+# (same again for apply phase — different subject claim = separate credential)
+
+# 4. Role assignment — what the SPN is allowed to DO in Azure
+resource "azurerm_role_assignment" "tfc_contributor" {
+  scope                = data.azurerm_subscription.current.id
+  role_definition_name = "Contributor"
+}
+
+# 5. TFC workspace — the remote execution environment + state store
+resource "tfe_workspace" "env" {
+  working_directory = "infra/envs/${each.key}"
+  auto_apply        = false  # manual "Confirm & Apply" always required
+  vcs_repo {
+    identifier     = "avilash87/cortex-ai"
+    oauth_token_id = var.tfc_vcs_oauth_token_id
+    branch         = "master"
+  }
+}
+
+# 6. TFC workspace variables — no copy-paste; reference outputs directly
+resource "tfe_variable" "workspace" {
+  # TFC_AZURE_PROVIDER_AUTH = "true"
+  # TFC_AZURE_RUN_CLIENT_ID = <client_id from app registration above>
+  # ARM_TENANT_ID / ARM_SUBSCRIPTION_ID
+}
+```
+
+**How TFC OIDC auth flows at run time:**
+```
+TFC runs a plan/apply
+  → requests OIDC token from app.terraform.io (its own JWT)
+  → presents token to Azure AD token endpoint
+  → Azure checks: is issuer "app.terraform.io"? ✓
+                  does subject match the federated credential exactly? ✓
+  → returns a short-lived Azure access token
+  → TFC uses that token for all azurerm/azuread API calls
+  → token expires; next run gets a fresh one
+  → NO secret is stored anywhere
+```
+
+**Interview answer — why OIDC/federated credentials over a client secret:**
+> "A client secret is a long-lived credential that has to be stored somewhere, rotated
+> manually, and works from anywhere it's copied to. A federated credential is a trust
+> statement — Azure will only issue a token when it receives a JWT from the exact
+> trusted issuer with the exact expected subject claim. Nothing to store, nothing to
+> rotate, and the token is scoped to a single run. If the issuer or subject doesn't
+> match, the exchange fails."
+
+---
+
+### management-group — what it creates and why
+
+```hcl
+# The full 10-MG CAF hierarchy
+resource "azurerm_management_group" "root"         { name = "mg-cortex-ai" }
+resource "azurerm_management_group" "platform"     { parent = root }
+resource "azurerm_management_group" "connectivity" { parent = platform }
+resource "azurerm_management_group" "management"   { parent = platform }
+resource "azurerm_management_group" "identity"     { parent = platform }
+resource "azurerm_management_group" "landingzones" { parent = root }
+resource "azurerm_management_group" "corp"         { parent = landingzones }
+resource "azurerm_management_group" "online"       { parent = landingzones }
+resource "azurerm_management_group" "sandbox"      { parent = root }
+resource "azurerm_management_group" "decommissioned" { parent = root }
+
+# Subscription placed under Corp (not Sandbox — this is a real project)
+resource "azurerm_management_group_subscription_association" "cortex_ai" {
+  management_group_id = azurerm_management_group.corp.id
+  subscription_id     = "/subscriptions/5e131d1f-..."
+}
+
+# Landing-zone RGs — created here, not manually
+resource "azurerm_resource_group" "lz" {
+  for_each = { dev = {...}, test = {...} }
+  name     = "rg-cortex-ai-${each.key}"
+  location = "uksouth"
+  tags     = { owner = "avilashj", env = each.key, cost-centre = "cortex-ai-poc" }
+}
+```
+
+**Why the subscription is under `mg-cortex-corp`, not `mg-cortex-sandbox`:**
+> "Sandbox is for throwaway developer experiments with relaxed policy. Our
+> subscription runs a real project with private VNet connectivity and production-
+> grade tooling. In a bank, anything that connects to the corporate network goes
+> into a Corp landing zone subscription — that's what we're building."
+
+**The `terraform import` lesson:**
+When we ran the bootstrap, two RGs already existed in Azure from an earlier
+manual `az group create` command. Terraform refused to create them (resource
+with that ID already exists). Fix: `terraform import` brings an existing Azure
+resource under Terraform management without destroying it.
+```bash
+terraform import 'azurerm_resource_group.lz["dev"]' \
+  /subscriptions/.../resourceGroups/rg-cortex-ai-dev
+```
+In production this comes up when: a team manually created something before IaC
+existed, or when recovering from lost state. Import is always safer than
+deleting and recreating.
+
+---
+
+### hub-network — what it creates and why
+
+```hcl
+# Hub VNet — the central choke-point
+resource "azurerm_virtual_network" "hub" {
+  name          = "vnet-hub-cortex-dev"
+  address_space = ["10.0.0.0/16"]
+}
+
+# Fixed-name subnets Azure requires (name must be EXACT)
+resource "azurerm_subnet" "gateway"  { name = "GatewaySubnet" }      # VPN/ER
+resource "azurerm_subnet" "firewall" { name = "AzureFirewallSubnet" } # Firewall
+
+# DNS resolver subnets (delegated — Azure manages them, you don't attach NSGs)
+resource "azurerm_subnet" "dns_inbound"  { delegated to Microsoft.Network/dnsResolvers }
+resource "azurerm_subnet" "dns_outbound" { delegated to Microsoft.Network/dnsResolvers }
+
+# Spoke VNets — one per workload, each peered to hub
+resource "azurerm_virtual_network" "spoke" {
+  for_each      = { ai = ["10.1.0.0/16"], data = ["10.2.0.0/16"], sandbox = ["10.3.0.0/16"] }
+}
+
+# Bidirectional peering — hub can forward traffic; spokes use hub's gateway
+resource "azurerm_virtual_network_peering" "hub_to_spoke" {
+  allow_forwarded_traffic = true
+  allow_gateway_transit   = true   # hub acts as gateway for spokes
+}
+resource "azurerm_virtual_network_peering" "spoke_to_hub" {
+  allow_forwarded_traffic = true
+  use_remote_gateways     = false  # flip to true when real VPN/ER gateway exists
+}
+
+# DNS Private Resolver — centralises private endpoint name resolution
+resource "azurerm_private_dns_resolver" "hub" { virtual_network_id = hub.id }
+resource "azurerm_private_dns_resolver_inbound_endpoint" "hub" {
+  subnet_id = dns_inbound.id   # <— this IP is what you set as DNS server on spokes
+}
+
+# Cost budget — alerts before you overspend
+resource "azurerm_consumption_budget_subscription" "poc" {
+  amount     = 50   # GBP
+  time_grain = "Monthly"
+  time_period { start_date = "${substr(timestamp(), 0, 7)}-01T00:00:00Z" }
+  notification { threshold = 80;  threshold_type = "Actual" }
+  notification { threshold = 100; threshold_type = "Forecasted" }
+}
+```
+
+**Why DNS resolution from spokes works without per-spoke DNS zones:**
+```
+Pod in vnet-spoke-ai queries: storage123.privatelink.blob.core.windows.net
+  → spoke's custom DNS server = hub DNS resolver inbound endpoint IP
+  → resolver checks private DNS zones linked to the hub VNet
+  → finds A record: 10.1.1.5 (private endpoint IP)
+  → returns 10.1.1.5 to the pod
+  → pod connects directly over the private network
+```
+No DNS zone duplication. Add one private DNS zone once in the hub; all spokes
+resolve it automatically because they all point at the hub resolver.
+
+---
+
+### The GitHub + TFC pipeline wiring
+
+```
+Code push to avilash87/cortex-ai (master branch)
+    │
+    ├─ infra/** changed?
+    │      ↓
+    │  TFC workspace cortex-ai-dev (VCS-driven, auto-apply=false)
+    │      → speculative plan on PR (shows diff as required PR check)
+    │      → full plan on merge
+    │      → human reads plan in TFC UI
+    │      → human clicks "Confirm & Apply"
+    │
+    └─ services/** or charts/** changed?
+           ↓
+       GitHub Actions (Phase 5 — not yet built)
+           → lint → test → build → Trivy → SonarQube → OPA → push to ACR
+           → auto-deploy to dev namespace
+           → manual approval → deploy to test namespace
+```
+
+**Key design principle:** infrastructure changes and application changes go through
+completely separate pipelines. An application developer can never accidentally
+apply an infrastructure change. A platform engineer can never accidentally
+deploy application code.
+
+---
+
+### Gotchas we hit — worth remembering for the interview
+
+| What failed | Why | Fix |
+|---|---|---|
+| `az account management-group list` → `AuthorizationFailed` | Global Admin ≠ Azure RBAC. Two separate permission systems. | `az rest --method post .../elevateAccess` |
+| `github_branch_protection` failed | Requires GitHub Pro for private repos | Removed; enforced by GH Actions required status checks in Phase 5 instead |
+| `tfe_oauth_client` → "Repository doesn't exist" | GitHub username `avilash87` ≠ TFC org name `avilashj` — wrong owner in the identifier | Fixed `github_owner` variable default |
+| `terraform apply` → branch doesn't exist | Repo had no commits, so `master` branch didn't exist on GitHub | Pushed first commit before wiring VCS |
+| `start_date = formatdate("YYYY-MM-01T...")` → invalid format verb | Terraform's `formatdate` doesn't allow literal `T` in format string | Used `substr(timestamp(), 0, 7)` instead |
+| `push` rejected: file too large | Provider binaries and Terraform state were tracked before `.gitignore` was added | `git rm --cached` to untrack + orphan rebuild |
+| `azurerm_resource_group.lz already exists` | RGs were created manually earlier; Terraform had no state entry for them | `terraform import` |
+
+---
+
+### Phase 0 — Interview cheat-sheet (10 questions)
+
+**1. What is Terraform state and why does it matter?**
+> Terraform state is the mapping between your config and real Azure resources.
+> Without it, Terraform doesn't know what it has already created. If state is
+> local, it gets lost when your laptop does, or corrupts if two runs execute at
+> once. Remote state in TFC adds locking (only one run at a time) and shared
+> access (CI and humans use the same state).
+
+**2. What's the difference between a local `terraform workspace` and a TFC workspace?**
+> Local workspace = a named `.tfstate` file within one config directory. TFC
+> workspace = a completely separate execution context with its own variables,
+> state, run history, and approval gate. Apples and oranges — the name is
+> misleading.
+
+**3. How does TFC authenticate to Azure without a stored secret?**
+> OIDC workload identity federation. TFC gets a JWT from its own issuer, presents
+> it to Azure AD, Azure validates the issuer URL and subject claim against a
+> Federated Identity Credential on the app registration, then returns a
+> short-lived access token. Nothing is stored. The token is scoped to one run.
+
+**4. Why does each TFC run phase (plan vs apply) need its own federated credential?**
+> Because the OIDC subject claim includes `run_phase`. Azure's trust statement
+> says "trust tokens from this workspace AND this run phase". A plan token cannot
+> be reused for apply — different claim, different trust rule, different credential.
+
+**5. What is the Azure scope hierarchy?**
+> Tenant Root Group → Management Groups (up to 6 levels) → Subscriptions →
+> Resource Groups → Resources. Azure Policy and RBAC assigned at any level
+> inherit down automatically.
+
+**6. Why is the subscription under `mg-cortex-corp` and not `mg-cortex-sandbox`?**
+> Sandbox is for experiments with relaxed policy. Our subscription runs private
+> VNet-connected workloads against real services. Corp is the correct Landing Zone
+> tier for that. Putting it in Sandbox would mean corp-grade Azure Policy
+> assignments at `mg-cortex-corp` wouldn't apply to our resources.
+
+**7. What is hub-and-spoke networking and why does a bank use it?**
+> Hub = one VNet with Azure Firewall, DNS resolver, VPN/ER gateway — shared
+> infrastructure. Spokes = one VNet per workload, peered to the hub. All cross-
+> spoke traffic goes through the hub firewall for east-west inspection. All egress
+> through the hub for south-north control. Shared services (ExpressRoute,
+> centralized DNS) can't be cheaply duplicated per-workload.
+
+**8. Why is DNS centralized in the hub?**
+> Private DNS zones must be authoritative for a domain exactly once. If each
+> spoke had its own copy, they'd diverge. The DNS Private Resolver in the hub
+> receives all DNS queries from spokes (via custom DNS server setting) and
+> resolves them against zones linked to the hub VNet. Add a private endpoint
+> in any spoke → resolves correctly across all spokes automatically.
+
+**9. What is `terraform import` and when do you need it?**
+> `terraform import` takes an existing Azure resource (with a known resource ID)
+> and adds a state entry for it without touching the resource itself. You need
+> it when: infrastructure was created manually before IaC existed, Terraform
+> state was lost, or (as happened here) the same resource was created by an
+> earlier step. Safer than delete-and-recreate because the resource stays live.
+
+**10. What's the difference between Entra ID roles and Azure RBAC roles?**
+> Entra ID roles (Global Admin, User Admin) govern the *directory* — who can
+> manage users, apps, groups. Azure RBAC roles (Owner, Contributor) govern
+> *Azure resource* access — who can create/modify/delete Azure resources.
+> Being Global Admin gives you zero Azure resource permissions by default.
+> "Elevate access" is the bridge: it temporarily grants User Access Administrator
+> at tenant root, letting you bootstrap Azure RBAC. Remove it afterward.
+
+---
+
+### What's live in Azure right now
+
+| Resource | Name | Managed by |
+|---|---|---|
+| Entra App Registration (dev) | `cortex-ai-tfc-dev` | tfc-cloud-setup local state |
+| Entra App Registration (test) | `cortex-ai-tfc-test` | tfc-cloud-setup local state |
+| TFC workspace | `cortex-ai-dev` | tfc-cloud-setup local state |
+| TFC workspace | `cortex-ai-test` | tfc-cloud-setup local state |
+| Management group root | `mg-cortex-ai` | management-group local state |
+| Management groups (×9) | see hierarchy above | management-group local state |
+| Resource group (dev LZ) | `rg-cortex-ai-dev` | management-group local state |
+| Resource group (test LZ) | `rg-cortex-ai-test` | management-group local state |
+| Hub VNet | `vnet-hub-cortex-dev` | hub-network local state |
+| Spoke VNets (×3) | `vnet-spoke-{ai,data,sandbox}-cortex-dev` | hub-network local state |
+| DNS Private Resolver | `dnspr-hub-cortex-dev` | hub-network local state |
+| Management tools RG | `rg-cortex-management-dev` | hub-network local state |
+| Cost budget | `budget-cortex-ai-poc` | hub-network local state |
+
+**Nothing is yet managed by TFC** (the `infra/envs/dev` workspace has an empty
+plan). Phase 1 will be the first real TFC-managed resource.
+
+---
+
+### Phase 1 preview — what's coming
+
+Phase 1 adds NSGs (Network Security Groups) and UDRs (User Defined Routes) to
+the spoke subnets already created, and assigns the first Azure Policies at the
+management group level. This is where the MG hierarchy and hub-and-spoke
+network start being used for real governance.
+
+**Before Phase 1 starts, answer these out loud:**
+1. In the hub-and-spoke network, what prevents spoke-to-spoke traffic today
+   (since there's no Firewall yet)?
+2. Azure Policy is assigned at `mg-cortex-corp`. Our subscription is under
+   `mg-cortex-corp`. What happens to a storage account created in
+   `rg-cortex-ai-dev` if that policy says "deny public network access"?
+3. What would you add to the hub-network bootstrap to enforce that all spoke
+   VNet traffic goes through the hub firewall (even before the firewall exists)?
