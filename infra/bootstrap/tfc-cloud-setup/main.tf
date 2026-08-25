@@ -41,6 +41,15 @@ resource "azurerm_role_assignment" "tfc_contributor" {
   principal_id         = azuread_service_principal.tfc[each.key].object_id
 }
 
+# Reader at mg-cortex-corp lets Terraform data sources query the management group
+# (e.g. data.azurerm_management_group for policy assignments in infra/envs/*).
+resource "azurerm_role_assignment" "tfc_mg_reader" {
+  for_each             = var.envs
+  scope                = "/providers/Microsoft.Management/managementGroups/mg-cortex-corp"
+  role_definition_name = "Reader"
+  principal_id         = azuread_service_principal.tfc[each.key].object_id
+}
+
 # ============================================================================
 # GITHUB REPOSITORY
 # Looks up (or creates) the repo and manages settings. Branch protection on a

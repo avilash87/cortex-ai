@@ -1,0 +1,90 @@
+name: Infra PR checks
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - "infra/**"
+      - ".github/workflows/infra-pr.yml"
+
+permissions:
+  contents: read
+  pull-requests: write   # allows posting a comment with plan/scan summary
+
+jobs:
+  fmt:
+    name: Terraform format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.15"
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      # Fail fast if any .tf file is not formatted — enforces consistent style
+      - name: fmt check
+        run: terraform fmt -check -recursive infra/
+
+  validate:
+    name: Terraform validate
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        env: [dev, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.15"
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+
+      # init required to resolve module sources and providers before validate
+      - name: Init
+        run: terraform init -input=false
+        working-directory: infra/envs/${{ matrix.env }}
+
+      - name: Validate
+        run: terraform validate
+        working-directory: infra/envs/${{ matrix.env }}
+
+  security-scan:
+    name: Trivy IaC scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy on infra/
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: infra/
+          # HIGH and CRITICAL misconfigs fail the check; MEDIUM is advisory only
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          format: table
+
+  opa-policy:
+    name: OPA / Conftest policy check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Conftest runs the Rego policies in policy/opa/ against all .tf files.
+      # In Phase 5 more policies are added; right now it runs with whatever
+      # policies exist (an empty policy/ dir is a pass, not an error).
+      - name: Install Conftest
+        run: |
+          wget -q https://github.com/open-policy-agent/conftest/releases/download/v0.51.0/conftest_0.51.0_Linux_x86_64.tar.gz
+          tar xzf conftest_0.51.0_Linux_x86_64.tar.gz
+          sudo mv conftest /usr/local/bin/
+
+      - name: Run Conftest
+        run: |
+          if ls policy/opa/*.rego 2>/dev/null; then
+            conftest test infra/ --policy policy/opa/
+          else
+            echo "No OPA policies yet — skipping (policies added in Phase 5)"
+          fi
