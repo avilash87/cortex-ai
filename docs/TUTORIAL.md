@@ -1207,3 +1207,80 @@ This finds unrestricted small SKUs in real time. `Standard_D2ns_v6` (2 vCPU, 8GB
 5. **Delete Bastion when not needed** — `az network bastion delete -g rg-cortex-connectivity-dev -n bastion-cortex-dev` — ~$0.19/hr while running.
 
 Phase 4 (FastAPI application) starts once the VM is accessible via Bastion. WireGuard and Nexus installation on the VM is part of Phase 4 setup.
+
+---
+
+## Phase 3 — Addendum: what actually happened getting Bastion working
+
+The plan above describes the intended path. In practice, closing out Phase 3 surfaced four separate real problems — each one is good interview material in its own right, arguably more valuable than the happy path, because they're all "how do you debug this in production" questions rather than "what is X."
+
+### Problem 1: Browser Bastion sessions failed, every time
+
+Symptom: connecting via Portal → VM → Connect → Bastion consistently produced *"The Bastion Host has closed the connection because there has been no response from your browser..."* — reproduced across two browsers (Edge, another) and two networks (home WiFi, mobile hotspot).
+
+**Diagnostic method, in order:**
+1. Azure Bastion's own **Connection Troubleshoot** tool (Bastion resource → Monitoring) — pinged Bastion → VM on TCP/22 and came back **Healthy**, ~1ms RTT. This ruled out NSGs, routing, and VM availability entirely — the backend was fine.
+2. Browser DevTools → Network tab → filter `WS` → reconnect. The WebSocket showed **101 Switching Protocols** — a real, successful handshake — then went quiet for ~15s before the server-side timeout fired. This is the key diagnostic move: it separates "can't connect at all" (DNS/firewall/proxy blocking) from "connects, then the stream dies" (something interrupting a long-lived connection specifically).
+3. Ruled out antivirus/TLS-inspection software (personal machine, Defender only) and corporate VPN/EDR (not applicable) by elimination.
+4. Root cause (likely, never 100% proven — this is realistically how a chunk of production networking debugging actually ends): Windows WiFi adapter power management silently drops packets on long idle-looking connections. The fix offered was Device Manager → Network adapter → Power Management → uncheck "Allow the computer to turn off this device to save power."
+
+**The pragmatic fallback, applied instead of chasing the browser issue further:** upgrade Bastion from **Basic** to **Standard** SKU (`~$0.19/hr` → `~$0.29/hr`) to unlock the **native client** (`az network bastion ssh`), which tunnels SSH over a local CLI process instead of a browser WebSocket — sidestepping the whole category of browser/OS network-stack issues. This worked immediately.
+
+```hcl
+resource "azurerm_bastion_host" "management" {
+  sku               = "Standard"   # was "Basic"
+  tunneling_enabled = true          # new — required for native client
+  # ...
+}
+```
+Verified via `terraform plan` before applying that Basic→Standard is an **in-place update** (confirmed both in HashiCorp's docs and the actual plan output) — only *downgrading* Standard→Basic forces replacement.
+
+### Problem 2: the VM had zero internet egress, by design, since Phase 1
+
+Once inside via native client, `sudo apt install docker.io` failed (`no installation candidate` — Azure's minimal Ubuntu image doesn't enable the `universe` repo), and the fallback `curl https://get.docker.com` **timed out after 5 minutes**. Not a DNS error, not "connection refused" — a pure timeout, which is the signature of packets being routed somewhere that silently drops them rather than being blocked at the source.
+
+Root cause: Phase 1 attached a UDR to the VM's subnet (`snet-general`) forcing **all** `0.0.0.0/0` egress to `10.0.1.4` — a placeholder Azure Firewall private IP. The Firewall itself doesn't exist until Phase 9. Azure's actual behavior when a UDR's `next_hop_in_ip_address` points at nothing: **silently drop the traffic**, not reject it. The code even said so in a comment ("a deliberate security default") — it just hadn't been connected to the fact that Phase 3's own bootstrapping needs egress that Phase 1's control was built to prevent.
+
+This is a real, common shape of production incident: a security control lands before the thing it depends on exists, and blocks a legitimate later use case. The fix — flagged explicitly as temporary — was to route that one subnet straight to the internet until Phase 9 builds the real firewall:
+```hcl
+route {
+  name           = "default-via-firewall"
+  address_prefix = "0.0.0.0/0"
+  next_hop_type  = "Internet"        # was "VirtualAppliance" -> 10.0.1.4
+}
+```
+
+### Problem 3: TFC merges to master weren't auto-applying
+
+Several PRs landed cleanly (all CI checks green, plan verified safe) but never triggered a Terraform Cloud run automatically after merge — each one needed a manual "Start new plan" click in the TFC UI. Root cause, found via the TFC API:
+```
+file-triggers-enabled: true
+trigger-prefixes: []
+```
+`file-triggers-enabled: true` means "only auto-trigger when a changed file matches one of these prefixes" — and the prefix list was **empty**, which matches nothing. The one PR that *did* auto-trigger correctly (`outputs.tf`) happened to sit directly in the workspace's own working directory (`infra/envs/dev`); everything else lived in `infra/modules/`, outside it. Fixed by setting `trigger-prefixes: ["infra/"]` via the TFC API — a workspace setting, not something version-controlled in the repo itself, which is exactly why it's easy for this kind of gap to go unnoticed.
+
+**Interview framing:** this is a good example of "CI/CD pipeline debugging" that has nothing to do with the application or the Terraform code being wrong — the automation *around* the code was silently misconfigured.
+
+### Problem 4: writing the SSH key to Key Vault couldn't use interactive login
+
+`az login` (device code flow, the only option on a headless VM over SSH) failed with `AADSTS530035: Access has been blocked by security defaults`. This is intentional Entra ID behavior — Security Defaults blocks device-code flow specifically because it's a known phishing vector (a user can be tricked into entering a legitimate device code on an attacker's prompt). Disabling Security Defaults tenant-wide to work around it would have removed MFA enforcement for every user — a wildly disproportionate fix for one VM's key-write task.
+
+The correct fix was also the more architecturally sound one: give the VM a **system-assigned managed identity** and grant *that* identity access, so it authenticates with `az login --identity` — no human, no device code, nothing for Security Defaults to block. This is the same "Workload Identity, no stored credentials" pattern CLAUDE.md already mandates elsewhere in the project; the interactive login attempt was actually the anti-pattern here, not the workaround.
+
+Two wrinkles worth knowing about, both genuinely useful Terraform gotchas:
+- **`az login --identity` alone still failed** with *"No access was configured for the managed identity, hence no subscriptions were found."* — `az login` tries to enumerate ARM-level (subscription/RBAC) access by default, but this identity was only ever granted a Key Vault **access policy** (a data-plane permission, not an Azure RBAC role). Fixed with `az login --identity --allow-no-subscriptions`, which skips subscription enumeration entirely — appropriate here since the only thing this identity does is call the Key Vault data plane.
+- **The Key Vault access policy for the identity couldn't be added in the same `terraform apply` that created the identity.** `azurerm_key_vault`'s `access_policy` is a Set-typed nested block internally, and Terraform can't hash a not-yet-known value (the identity's `principal_id`, only known after that same apply creates it) into a Set at plan time — it fails with a cryptic `argument is required` error rather than a clear "value not yet known" message. The fix was mechanical: split it into two applies — create the identity first, then (once its `principal_id` is a real value sitting in state) add the access policy referencing it.
+
+### Phase 3 addendum — interview tips
+
+**Q: How do you debug "it connects, then it dies" versus "it just doesn't connect"?**
+> Open the browser/client's own connection inspector (DevTools Network tab, `tcpdump`, whatever's available) and look for the actual handshake result, not just the final user-facing error. A successful handshake (TLS negotiated, WebSocket 101, TCP SYN-ACK) followed by silence points at something disrupting a *sustained* connection — idle timeouts, power management, stateful firewall/NAT reset — not something blocking the connection outright (DNS filtering, ACL deny, proxy block). These need completely different fixes, and conflating them wastes debugging time.
+
+**Q: What's the failure mode of a UDR pointing at a non-existent next hop?**
+> Azure drops the traffic silently rather than rejecting it — no ICMP unreachable, no RST, just a timeout from the client's perspective. This is a deliberate fail-closed security behavior (an incomplete route shouldn't leak traffic to the internet unfiltered), but it means a misconfigured or not-yet-built next hop is indistinguishable, from the client side, from a genuinely flaky network — which is exactly what made this one take longer to diagnose than it should have.
+
+**Q: Why does Security Defaults block device code flow specifically?**
+> Device code flow's UX — "go to this URL and enter this code" — is trivially phishable: an attacker can generate a real device code, send it to a victim, and have them approve *the attacker's* session. Security Defaults blocks it by default for exactly this reason. The correct response to hitting this isn't to disable Security Defaults; it's to use a non-interactive auth method that doesn't need a human in the loop at all — managed identity, service principal with federated credentials, etc.
+
+**Q: Why can't you always reference a resource's computed attribute in the same `apply` that creates it?**
+> Usually you can — Terraform's dependency graph handles "create A, then create B using A's output" within one apply as standard practice. It breaks down specifically for Set-typed (as opposed to List-typed) nested blocks/attributes, because Terraform needs to compute a stable hash for every element of a set at plan time, and it can't hash a value that doesn't exist yet. The practical tell is a plan-time error like "argument is required" on a value you know you provided — check whether the target attribute is List or Set typed in the provider schema before assuming your code is wrong.
