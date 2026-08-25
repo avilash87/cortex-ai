@@ -1,0 +1,36 @@
+# WireGuard VPN — self-hosted stand-in for the P2S VPN Gateway Phase 9 builds
+# with Azure's native service. Gives the laptop a virtual IP inside the hub's
+# address space so every private endpoint in every spoke (Key Vault, Storage,
+# ACR today; AKS/APIM later) is reachable without a public endpoint anywhere.
+#
+# Deploy on vm-cortex-management-dev only (not committed to run via Terraform
+# or CI — this is manual, ephemeral tooling, powered on only while studying).
+#
+# First pull is direct from ghcr.io/lscr.io, not through Nexus — Nexus isn't
+# running yet at this point in Phase 4 bootstrap. Flagged per CLAUDE.md's
+# Nexus-chokepoint rule; every image pulled *after* Nexus is up should go
+# through it instead.
+services:
+  wireguard:
+    image: lscr.io/linuxserver/wireguard:latest
+    container_name: wireguard
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - SERVERURL=20.117.79.15 # vm-cortex-management-dev public IP
+      - SERVERPORT=51820
+      - PEERS=laptop
+      - PEERDNS=10.0.2.4 # dnspr-hub-cortex-dev inbound endpoint — resolves privatelink.* names
+      - INTERNAL_SUBNET=10.13.13.0
+      - ALLOWEDIPS=10.0.0.0/8 # hub 10.0.0.0/16 + every spoke (10.1-10.3.0.0/16 today)
+    volumes:
+      - ./config:/config
+      - /lib/modules:/lib/modules:ro
+    ports:
+      - 51820:51820/udp
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    restart: unless-stopped
