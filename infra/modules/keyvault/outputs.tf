@@ -30,6 +30,11 @@ output "management_vm_private_ip" {
   value = var.create_management_vm ? azurerm_network_interface.management[0].private_ip_address : null
 }
 
+output "bastion_public_ip" {
+  description = "Browse Azure Portal → management VM → Connect → Bastion to SSH in"
+  value       = var.create_management_vm ? azurerm_public_ip.bastion[0].ip_address : null
+}
+
 output "ssh_private_key_pem" {
   value     = var.create_management_vm ? tls_private_key.management_vm[0].private_key_pem : null
   sensitive = true
