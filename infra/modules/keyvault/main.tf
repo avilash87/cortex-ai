@@ -54,6 +54,12 @@ resource "azurerm_key_vault" "this" {
 
     secret_permissions = ["Get", "List", "Set", "Delete"]
   }
+
+  # VM's managed-identity access policy is added in a follow-up change once
+  # the identity's principal_id is a known value in state (see main.tf VM
+  # identity block below) — azurerm_key_vault's access_policy is a Set-typed
+  # nested block and can't reference an unknown/not-yet-created principal_id
+  # in the same apply that creates it.
 }
 
 # SSH private key is stored in TFC state (encrypted at rest by HCP Terraform).
@@ -148,6 +154,12 @@ resource "azurerm_linux_virtual_machine" "management" {
   ]
   disable_password_authentication = true
   tags                            = var.tags
+
+  # Used for `az login --identity` on the VM to write its own SSH key to
+  # Key Vault, without interactive user auth (blocked by Security Defaults).
+  identity {
+    type = "SystemAssigned"
+  }
 
   admin_ssh_key {
     username   = var.admin_username
