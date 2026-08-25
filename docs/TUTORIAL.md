@@ -1112,3 +1112,98 @@ All pipeline builds pull through Nexus, never directly from the internet. This i
 1. Why does the private SSH key go to Key Vault and not to a Terraform output?
 2. Our Phase 1 Azure Policy says "Deny public network access on Key Vault." What will happen at plan time if we create a Key Vault without the `network_acls` block?
 3. WireGuard's NSG rule allows `source = "*"` on UDP/51820. Why is this acceptable despite Trivy flagging it as CRITICAL?
+
+---
+
+## Phase 3 — Complete: Platform Foundation
+
+### What we built
+
+| Resource | Name pattern | Notes |
+|---|---|---|
+| Key Vault | `kv-cortex-dev-xxxxx` | Public access disabled; enforced by Phase 1 Azure Policy |
+| Storage account | `stcortexdevxxxxx` | Public access disabled; explicit Deny firewall |
+| ACR | `acrcortexdevxxxxx` | Premium SKU required for private endpoint |
+| Private endpoints | `pe-kv/blob/acr-cortex-dev` | In `snet-private-endpoints` of sandbox spoke |
+| Private DNS zones | `privatelink.vaultcore.azure.net` etc. | Created once in `rg-cortex-management-dev`, shared |
+| DNS VNet links | `link-kv/blob/acr-sandbox` | Link sandbox spoke to the private DNS zones |
+| Management VM | `vm-cortex-management-dev` | `Standard_D2ns_v6` (2 vCPU, 8GB) |
+| VM NIC + public IP | `nic/pip-cortex-management-dev` | Public IP is for WireGuard UDP/51820 only |
+| `AzureBastionSubnet` | in hub VNet | Required name — Azure Bastion won't deploy without it |
+| Azure Bastion | `bastion-cortex-dev` | Browser-based SSH without opening port 22; ~$0.19/hr |
+| SSH keypair | `tls_private_key` in TFC state | Raw PEM accessible via `terraform output -raw module.keyvault.ssh_private_key_pem` |
+
+### Why the Key Vault secret approach was scrapped
+
+The original plan stored the SSH private key as a Key Vault secret via Terraform. This produced a 403 from TFC because:
+- Key Vault has `public_network_access_enabled = false` (enforced by our own Phase 1 policy)
+- TFC runs from HashiCorp's infrastructure, not inside our VNet
+- There is no trusted-service exception for TFC OIDC callers
+
+The private key lives in TFC's encrypted remote state instead. To write it to Key Vault after WireGuard is up:
+```bash
+# Connect via WireGuard first, then:
+az keyvault secret set \
+  --vault-name <kv-cortex-dev-xxxxx> \
+  --name management-vm-ssh-private-key \
+  --value "$(terraform -chdir=infra/envs/dev output -raw 'module.keyvault.ssh_private_key_pem')"
+```
+
+### The Azure Bastion chicken-and-egg lesson
+
+The management VM's NSG (Phase 1) only allows SSH from `VirtualNetwork` — no public port 22. That's correct. But without WireGuard running there was no way to SSH into the VM at all. Azure Bastion solves this:
+
+```text
+Your browser → HTTPS → Azure Bastion public IP
+                          ↓ (tunnelled over TLS, stays inside Azure network)
+                     VM private IP (no public SSH port needed)
+```
+
+Bastion requires an `AzureBastionSubnet` (exact name, no deviations) in the hub VNet. We added this to the sandbox spoke's parent hub VNet.
+
+Once the apply succeeds:
+1. Azure Portal → Virtual machines → `vm-cortex-management-dev` → Connect → **Bastion**
+2. Enter `azureuser` and upload the SSH key downloaded from TFC output
+3. You get a browser-based terminal into the VM
+
+### VM SKU journey (how to diagnose capacity issues)
+
+Free/new Azure subscriptions have blanket `NotAvailableForSubscription` restrictions on most popular SKUs regardless of quota. After converting to PAYG, run:
+```bash
+az vm list-skus --location uksouth --resource-type virtualMachines --all true -o json > /tmp/skus.json
+python3 -c "
+import json
+skus = json.load(open('/tmp/skus.json'))
+ok = {s['name']: dict(zip([c['name'] for c in s.get('capabilities',[])],[c['value'] for c in s.get('capabilities',[])])) for s in skus if not s.get('restrictions')}
+for n,c in sorted(ok.items()):
+    if c.get('vCPUs','9')  <= '4':
+        print(n, 'vCPU:', c.get('vCPUs'), 'RAM:', c.get('MemoryGB'))
+"
+```
+This finds unrestricted small SKUs in real time. `Standard_D2ns_v6` (2 vCPU, 8GB) was confirmed available after PAYG conversion.
+
+### Phase 3 — Interview answers
+
+**1. Why does the private key go to Key Vault (eventually) and not to a Terraform output?**
+> Terraform outputs are visible in `terraform show` and in TFC's run logs. Marking an output `sensitive = true` hides it from the console but the value is still in state in plaintext. Key Vault is the right place for secrets because it has its own RBAC, audit log, soft delete, and access policies. The private key starts in state (unavoidable with `tls_private_key`) but should be migrated to Key Vault as soon as the network path exists — in our case, after WireGuard is up.
+
+**2. What happens if you create a Key Vault without `network_acls { default_action = "Deny" }`?**
+> The TFC apply fails with `RequestDisallowedByPolicy`. Our Phase 1 policy assignment at `mg-cortex-corp` has effect `Deny` and evaluates on every ARM write. The policy checks the resource properties before the resource is created — if `publicNetworkAccess` is not `Disabled`, Azure returns a 403 with `RequestDisallowedByPolicy` before the Key Vault exists.
+
+**3. WireGuard `source = "*"` on UDP/51820 — acceptable despite CRITICAL flag?**
+> WireGuard authenticates every connection with a cryptographic key exchange before any data flows — the handshake itself authenticates the peer. An open port does not mean an open service: without the correct private key, a connection attempt simply drops. This is fundamentally different from an open SSH or RDP port. We suppressed with `.trivyignore` and documented the justification. A static IP restriction would be more secure but is impractical for home broadband (dynamic IP). In production, a VPN Gateway with Entra ID P2S auth solves this properly (Phase 9).
+
+### Next steps for Phase 3 (actions still needed after apply)
+
+1. **Confirm the apply succeeded** — check `cortex-ai-dev` TFC run for ~25 new resources including the VM and Bastion.
+2. **Connect via Bastion** — Portal → VM → Connect → Bastion. Install Docker and Docker Compose:
+   ```bash
+   sudo apt update && sudo apt install -y docker.io docker-compose-v2
+   sudo usermod -aG docker azureuser
+   newgrp docker
+   ```
+3. **Write SSH key to Key Vault** — see command above (run after Docker is installed and WireGuard is up).
+4. **Deallocate the VM when not studying** — `az vm deallocate -g rg-cortex-management-dev -n vm-cortex-management-dev` — stops compute billing while keeping the disk (~£0.01/day).
+5. **Delete Bastion when not needed** — `az network bastion delete -g rg-cortex-connectivity-dev -n bastion-cortex-dev` — ~$0.19/hr while running.
+
+Phase 4 (FastAPI application) starts once the VM is accessible via Bastion. WireGuard and Nexus installation on the VM is part of Phase 4 setup.
