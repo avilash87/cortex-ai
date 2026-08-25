@@ -44,3 +44,13 @@ variable "hub_firewall_private_ip" {
   type        = string
   default     = "10.0.1.4"
 }
+
+# WireGuard needs internet-facing UDP since your laptop connects from a home
+# broadband IP (not static, can't be pinned in advance). "*" is the accepted
+# default for this single port; set to "<your-home-ip>/32" once known to narrow it,
+# and re-narrow if your ISP changes your IP (dynamic IP is the common case in the UK).
+variable "wireguard_allowed_source_prefix" {
+  description = "Source CIDR/IP allowed to reach the WireGuard UDP port (51820)"
+  type        = string
+  default     = "*"
+}
