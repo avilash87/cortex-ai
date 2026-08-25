@@ -76,6 +76,11 @@ resource "azurerm_storage_account" "this" {
   min_tls_version               = "TLS1_2"
   https_traffic_only_enabled    = true
   tags                          = var.tags
+
+  network_rules {
+    default_action = "Deny"
+    bypass         = ["AzureServices"]
+  }
 }
 
 resource "azurerm_container_registry" "this" {
