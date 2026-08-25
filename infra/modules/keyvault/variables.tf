@@ -79,8 +79,14 @@ variable "create_dns_zones" {
   default = true
 }
 
-# Used when create_dns_zones = false to locate zones created by another env call.
+# Used when create_management_vm = false to locate zones created by another env call.
 variable "existing_dns_zones_rg_name" {
   type    = string
   default = "rg-cortex-management-dev"
+}
+
+# AzureBastionSubnet is a fixed name required by Azure — /26 or larger is required.
+variable "bastion_subnet_prefix" {
+  type    = list(string)
+  default = ["10.3.2.0/26"]
 }

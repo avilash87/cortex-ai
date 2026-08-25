@@ -167,8 +167,41 @@ resource "azurerm_linux_virtual_machine" "management" {
   }
 }
 
-# =============================================================================
-# PRIVATE DNS ZONES — created once by dev, looked up by test
+# Azure Bastion — browser-based SSH/RDP with no public port 22 on the VM.
+# Only created alongside the management VM (create_management_vm = true).
+# Cost: ~$0.19/hr (Basic SKU) — destroy when not actively using it.
+resource "azurerm_subnet" "bastion" {
+  count                = var.create_management_vm ? 1 : 0
+  name                 = "AzureBastionSubnet"
+  resource_group_name  = var.sandbox_spoke_rg_name
+  virtual_network_name = data.azurerm_virtual_network.sandbox.name
+  address_prefixes     = var.bastion_subnet_prefix
+}
+
+resource "azurerm_public_ip" "bastion" {
+  count               = var.create_management_vm ? 1 : 0
+  name                = "pip-cortex-bastion-${var.env}"
+  location            = var.location
+  resource_group_name = var.management_rg_name
+  allocation_method   = "Static"
+  sku                 = "Standard"
+  tags                = var.tags
+}
+
+resource "azurerm_bastion_host" "management" {
+  count               = var.create_management_vm ? 1 : 0
+  name                = "bastion-cortex-${var.env}"
+  location            = var.location
+  resource_group_name = var.management_rg_name
+  sku                 = "Basic"
+  tags                = var.tags
+
+  ip_configuration {
+    name                 = "bastion-config"
+    subnet_id            = azurerm_subnet.bastion[0].id
+    public_ip_address_id = azurerm_public_ip.bastion[0].id
+  }
+}
 # Production design: these live in the Connectivity hub subscription.
 # POC simplification: created in rg-cortex-management-dev, shared by both envs.
 # =============================================================================
