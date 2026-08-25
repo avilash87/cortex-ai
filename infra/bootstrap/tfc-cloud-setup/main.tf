@@ -65,11 +65,21 @@ locals {
 }
 
 # ============================================================================
+# TFC VCS OAUTH CLIENT — GitHub connection via PAT, fully Terraform-managed.
+# PAT replaces the manual UI OAuth flow that expired. Terraform owns the token
+# so rotation = update the variable + re-apply, no TFC UI required.
+# Required PAT scopes: repo, admin:repo_hook
+# ============================================================================
+resource "tfe_oauth_client" "github" {
+  organization     = var.tfc_organization
+  api_url          = "https://api.github.com"
+  http_url         = "https://github.com"
+  oauth_token      = var.github_token
+  service_provider = "github"
+}
+
+# ============================================================================
 # TFC WORKSPACES + VARIABLES
-# VCS connection (GitHub → TFC) is wired manually once via TFC UI:
-#   Settings → VCS Providers → GitHub → Authorize → copy OAuth Token ID
-#   then re-apply with -var="tfc_vcs_oauth_token_id=ot-xxxx"
-# Workspaces are API-driven until the VCS token is provided.
 # ============================================================================
 resource "tfe_workspace" "env" {
   for_each     = var.envs
@@ -81,13 +91,10 @@ resource "tfe_workspace" "env" {
   terraform_version = "~> 1.15"
   queue_all_runs    = false
 
-  dynamic "vcs_repo" {
-    for_each = var.tfc_vcs_oauth_token_id != "" ? [1] : []
-    content {
-      identifier     = "${var.github_owner}/${local.repo_name}"
-      oauth_token_id = var.tfc_vcs_oauth_token_id
-      branch         = "master"
-    }
+  vcs_repo {
+    identifier     = "${var.github_owner}/${local.repo_name}"
+    oauth_token_id = tfe_oauth_client.github.oauth_token_id
+    branch         = "master"
   }
 }
 
