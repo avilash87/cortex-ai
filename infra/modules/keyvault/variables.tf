@@ -51,7 +51,7 @@ variable "sandbox_private_endpoints_subnet_name" {
 
 variable "vm_size" {
   type    = string
-  default = "Standard_D2s_v3"
+  default = "Standard_B1ms"
 }
 
 variable "admin_username" {
