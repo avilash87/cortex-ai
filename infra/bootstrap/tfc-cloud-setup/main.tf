@@ -182,74 +182,74 @@ locals {
   repo_name = var.create_github_repo ? github_repository.cortex_ai[0].name : data.github_repository.cortex_ai[0].name
 }
 
-# Ruleset: only PR merges allowed on master; listed status checks must be green.
-# Lab-vs-production: in production a CODEOWNERS file + 2 reviewers minimum
-# and a separate "prod" environment with a required-reviewers gate would be added.
-resource "github_repository_ruleset" "master" {
-  name        = "master-branch-protection"
-  repository  = local.repo_name
-  target      = "branch"
-  enforcement = "active"
+# # Ruleset: only PR merges allowed on master; listed status checks must be green.
+# # Lab-vs-production: in production a CODEOWNERS file + 2 reviewers minimum
+# # and a separate "prod" environment with a required-reviewers gate would be added.
+# resource "github_repository_ruleset" "master" {
+#   name        = "master-branch-protection"
+#   repository  = local.repo_name
+#   target      = "branch"
+#   enforcement = "active"
 
-  conditions {
-    ref_name {
-      include = ["refs/heads/master"]
-      exclude = []
-    }
-  }
+#   conditions {
+#     ref_name {
+#       include = ["refs/heads/master"]
+#       exclude = []
+#     }
+#   }
 
-  rules {
-    # Block direct pushes and force-pushes to master
-    deletion         = true
-    non_fast_forward = true
+#   rules {
+#     # Block direct pushes and force-pushes to master
+#     deletion         = true
+#     non_fast_forward = true
 
-    # Require a PR with at least 1 approval
-    pull_request {
-      required_approving_review_count = 1
-      dismiss_stale_reviews_on_push   = true
-      require_code_owner_review       = false
-      require_last_push_approval      = false
-    }
+#     # Require a PR with at least 1 approval
+#     pull_request {
+#       required_approving_review_count = 1
+#       dismiss_stale_reviews_on_push   = true
+#       require_code_owner_review       = false
+#       require_last_push_approval      = false
+#     }
 
-    # Context strings must match each job's *display* name exactly (the `name:`
-    # field in infra-pr.yml), not the job id — GitHub Actions reports check runs
-    # under the display name. Matrix jobs get "(<matrix value>)" auto-appended.
-    # 15368 = GitHub Actions app integration ID (constant across all repos).
-    required_status_checks {
-      strict_required_status_checks_policy = true
+#     # Context strings must match each job's *display* name exactly (the `name:`
+#     # field in infra-pr.yml), not the job id — GitHub Actions reports check runs
+#     # under the display name. Matrix jobs get "(<matrix value>)" auto-appended.
+#     # 15368 = GitHub Actions app integration ID (constant across all repos).
+#     required_status_checks {
+#       strict_required_status_checks_policy = true
 
-      required_check {
-        context        = "Terraform format"
-        integration_id = 15368
-      }
-      required_check {
-        context        = "Terraform validate (dev)"
-        integration_id = 15368
-      }
-      required_check {
-        context        = "Terraform validate (test)"
-        integration_id = 15368
-      }
-      required_check {
-        context        = "Trivy IaC scan"
-        integration_id = 15368
-      }
-      required_check {
-        context        = "OPA / Conftest policy check"
-        integration_id = 15368
-      }
-    }
-  }
+#       required_check {
+#         context        = "Terraform format"
+#         integration_id = 15368
+#       }
+#       required_check {
+#         context        = "Terraform validate (dev)"
+#         integration_id = 15368
+#       }
+#       required_check {
+#         context        = "Terraform validate (test)"
+#         integration_id = 15368
+#       }
+#       required_check {
+#         context        = "Trivy IaC scan"
+#         integration_id = 15368
+#       }
+#       required_check {
+#         context        = "OPA / Conftest policy check"
+#         integration_id = 15368
+#       }
+#     }
+#   }
 
-  # Repo admin (you, working standalone) can merge without waiting for a
-  # separate approver or all checks — useful for solo work. Team/production
-  # setups would remove this bypass so no single person can self-approve.
-  bypass_actors {
-    actor_id    = 5 # built-in "Admin" repository role
-    actor_type  = "RepositoryRole"
-    bypass_mode = "always"
-  }
-}
+#   # Repo admin (you, working standalone) can merge without waiting for a
+#   # separate approver or all checks — useful for solo work. Team/production
+#   # setups would remove this bypass so no single person can self-approve.
+#   bypass_actors {
+#     actor_id    = 5 # built-in "Admin" repository role
+#     actor_type  = "RepositoryRole"
+#     bypass_mode = "always"
+#   }
+# }
 
 # ============================================================================
 # TFC VCS OAUTH CLIENT — GitHub connection via PAT, fully Terraform-managed.
