@@ -1,9 +1,37 @@
 data "azurerm_subscription" "current" {}
 
+# Microsoft Graph service principal — looked up to grant app role assignments (admin consent).
+data "azuread_service_principal" "msgraph" {
+  client_id = "00000003-0000-0000-c000-000000000000"
+}
+
 # One app registration per env keeps blast radius separate (dev creds can't touch test).
 resource "azuread_application" "tfc" {
   for_each     = var.envs
   display_name = "cortex-ai-tfc-${each.key}"
+
+  # Declare the Graph API permissions the SPN will need for Phase 2 (IAM module).
+  # Declaration alone is not enough — azuread_app_role_assignment below grants + consents them.
+  required_resource_access {
+    resource_app_id = "00000003-0000-0000-c000-000000000000" # Microsoft Graph
+
+    resource_access {
+      id   = "741f803b-c850-494e-b5df-cde7c675a1ca" # User.ReadWrite.All
+      type = "Role"
+    }
+    resource_access {
+      id   = "62a82d76-70ea-41e2-9197-370581804d09" # Group.ReadWrite.All
+      type = "Role"
+    }
+    resource_access {
+      id   = "dbaae8cf-10b5-4b86-a4a1-f871c94c6695" # GroupMember.ReadWrite.All
+      type = "Role"
+    }
+    resource_access {
+      id   = "1bfefb4e-e0b5-418b-a88f-73c46d2cc8e9" # Application.ReadWrite.All
+      type = "Role"
+    }
+  }
 }
 
 resource "azuread_service_principal" "tfc" {
@@ -93,6 +121,42 @@ resource "azurerm_role_assignment" "tfc_mg_policy_contributor" {
   scope                = "/providers/Microsoft.Management/managementGroups/mg-cortex-corp"
   role_definition_name = "Resource Policy Contributor"
   principal_id         = azuread_service_principal.tfc[each.key].object_id
+}
+
+# User Access Administrator lets the TFC SPN write role assignments (azurerm_role_assignment).
+# Contributor explicitly excludes Microsoft.Authorization/*/Write — this fills that gap.
+resource "azurerm_role_assignment" "tfc_user_access_admin" {
+  for_each             = var.envs
+  scope                = data.azurerm_subscription.current.id
+  role_definition_name = "User Access Administrator"
+  principal_id         = azuread_service_principal.tfc[each.key].object_id
+}
+
+# Grant + admin-consent the Microsoft Graph application permissions declared in
+# required_resource_access above. Without this step the declaration is display-only.
+# One azuread_app_role_assignment = one granted + consented permission.
+locals {
+  graph_app_roles = {
+    "User.ReadWrite.All"        = "741f803b-c850-494e-b5df-cde7c675a1ca"
+    "Group.ReadWrite.All"       = "62a82d76-70ea-41e2-9197-370581804d09"
+    "GroupMember.ReadWrite.All" = "dbaae8cf-10b5-4b86-a4a1-f871c94c6695"
+    "Application.ReadWrite.All" = "1bfefb4e-e0b5-418b-a88f-73c46d2cc8e9"
+  }
+  # Cartesian product: {env_key}:{permission_name}
+  tfc_graph_grants = {
+    for pair in setproduct(keys(var.envs), keys(local.graph_app_roles)) :
+    "${pair[0]}:${pair[1]}" => {
+      env_key     = pair[0]
+      app_role_id = local.graph_app_roles[pair[1]]
+    }
+  }
+}
+
+resource "azuread_app_role_assignment" "tfc_graph" {
+  for_each            = local.tfc_graph_grants
+  app_role_id         = each.value.app_role_id
+  principal_object_id = azuread_service_principal.tfc[each.value.env_key].object_id
+  resource_object_id  = data.azuread_service_principal.msgraph.object_id
 }
 
 # ============================================================================
