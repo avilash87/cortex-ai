@@ -35,6 +35,14 @@ variable "initial_password" {
   sensitive   = true
 }
 
+# The *.onmicrosoft.com domain always exists and never changes. Using a variable
+# avoids the Domain.Read.All Graph API permission that a data source would require.
+variable "tenant_domain" {
+  description = "Default Entra ID tenant domain for constructing user UPNs"
+  type        = string
+  default     = "avilashj87gmail.onmicrosoft.com"
+}
+
 # GitHub Actions SPN object ID — created in the bootstrap alongside TFC OIDC.
 # RBAC grants for CI/CD are managed here so they follow the same per-env pattern
 # as all other role assignments. The SPN itself (app reg + federated creds) lives

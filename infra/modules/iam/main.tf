@@ -1,9 +1,3 @@
-# Tenant's default domain — needed to construct user principal names.
-# For this tenant: avilashj87gmail.onmicrosoft.com
-data "azuread_domains" "primary" {
-  only_default = true
-}
-
 # =============================================================================
 # ENTRA ID USERS
 # Cloud-only users simulating what would be synced from on-prem AD in production.
@@ -13,7 +7,7 @@ data "azuread_domains" "primary" {
 resource "azuread_user" "persona" {
   for_each = var.personas
 
-  user_principal_name   = "${each.key}@${data.azuread_domains.primary.domains[0].domain_name}"
+  user_principal_name   = "${each.key}@${var.tenant_domain}"
   display_name          = each.value.display_name
   mail_nickname         = each.key
   password              = var.initial_password
