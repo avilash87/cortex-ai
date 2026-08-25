@@ -38,16 +38,19 @@ variable "github_token" {
 }
 
 variable "envs" {
-  description = "One entry per environment: TFC workspace name"
+  description = "One entry per environment: TFC workspace name + apply gate"
   type = map(object({
     workspace_name = string
+    auto_apply     = bool # true = merge to master deploys immediately; false = requires manual Confirm & Apply in TFC UI
   }))
   default = {
     dev = {
       workspace_name = "cortex-ai-dev"
+      auto_apply     = true # dev auto-deploys on merge — fast feedback loop
     }
     test = {
       workspace_name = "cortex-ai-test"
+      auto_apply     = false # test requires a human to review the plan and click Confirm & Apply
     }
   }
 }

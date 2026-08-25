@@ -762,3 +762,239 @@ network start being used for real governance.
    `rg-cortex-ai-dev` if that policy says "deny public network access"?
 3. What would you add to the hub-network bootstrap to enforce that all spoke
    VNet traffic goes through the hub firewall (even before the firewall exists)?
+
+---
+
+## Phase 1 — Complete: Networking, Azure Policy, CI/CD pipeline
+
+### What we built
+
+#### Network module (`infra/modules/network/`)
+Subnets inside the spoke VNets created by the hub-network bootstrap, NSGs on
+each subnet, and route tables (UDRs) pointing `0.0.0.0/0` at the hub
+Azure Firewall's private IP (placeholder `10.0.1.4` until Phase 9):
+
+```
+vnet-spoke-ai:
+  snet-aks-nodes         10.1.0.0/24   NSG: allow AKS API server + LB probe
+  snet-private-endpoints 10.1.1.0/24   NSG: allow VNet inbound only
+  snet-apim              10.1.2.0/24   route table attached (Phase 8)
+
+vnet-spoke-sandbox:
+  snet-general           10.3.0.0/24   NSG: allow SSH from VNet + WireGuard UDP/51820
+  snet-private-endpoints 10.3.1.0/24
+```
+
+All subnets have a route table with `default-via-firewall`:
+```hcl
+route {
+  address_prefix         = "0.0.0.0/0"
+  next_hop_type          = "VirtualAppliance"
+  next_hop_in_ip_address = "10.0.1.4"  # hub firewall — flipped to real IP in Phase 9
+}
+```
+`bgp_route_propagation_enabled = false` prevents on-prem BGP routes from
+overriding this explicit default route.
+
+#### Azure Policy assignments
+Three built-in policies assigned at `mg-cortex-corp` — they inherit down to
+our subscription and every resource group under it:
+
+| Policy | Definition ID | Effect |
+|---|---|---|
+| Require `owner` tag on RGs | `96670d01-...` | Deny |
+| Require `env` tag on RGs | `96670d01-...` | Deny |
+| Deny public network access on Key Vault | `405c5871-...` | Deny |
+
+*Why these three?* Tags enforce chargeback/showback discipline from day one
+(the `cost-centre` tag is already on every resource; these add the other two).
+The Key Vault policy enforces a principle we'll rely on in Phase 3: Key Vaults
+are private-only, period.
+
+Permission learned: `Contributor` does NOT include
+`Microsoft.Authorization/policyAssignments/write`. That requires `Resource
+Policy Contributor` separately — a deliberate Azure separation-of-duties
+decision so a compromised Contributor can't disable the governance policies
+constraining it.
+
+#### Infrastructure CI/CD pipeline
+```
+PR to master touching infra/**
+  ├── GitHub Actions (infra-pr.yml):
+  │     - terraform fmt -check -recursive
+  │     - terraform validate (dev + test envs, matrix)
+  │     - Trivy IaC scan (HIGH/CRITICAL fail; .trivyignore for AVD-AZU-0047)
+  │     - OPA/Conftest policy check
+  └── TFC: speculative plan posted as PR commit status
+
+Merge to master
+  ├── TFC cortex-ai-dev:  full plan → auto_apply=true  → deploys immediately
+  └── TFC cortex-ai-test: full plan → auto_apply=false → awaits manual confirm
+```
+
+GitHub repository ruleset on `master`:
+- No direct pushes (PR required)
+- 1 approving review required
+- All 5 GitHub Actions checks must be green
+- Admin bypass so solo work is unblocked
+
+#### Trivy + .trivyignore pattern
+WireGuard NSG has `source_address_prefix = "*"` on UDP/51820. Trivy flags this
+as `AVD-AZU-0047 CRITICAL`. This is an accepted, documented risk — not a
+mistake:
+- Home broadband IP is dynamic; can't be pinned to a CIDR without breaking the VPN.
+- WireGuard's own cryptographic handshake authenticates every connection.
+- Suppressed in `.trivyignore` with a written justification (auditable, reviewable in PRs).
+
+**Rule: never suppress a scanner finding without writing WHY in the ignore file.**
+
+---
+
+### Phase 1 — Interview cheat-sheet (8 questions)
+
+**1. What's an NSG and how does it differ from Azure Firewall?**
+> NSG = L4 stateful rules (IP/port) on a subnet or NIC. Free. No central
+> visibility. Azure Firewall = managed, centralised in the hub, supports FQDN
+> filtering, IDPS (Standard/Premium), full diagnostic logs. NSGs are the first
+> line; Firewall is the east-west and egress choke-point.
+
+**2. What is a UDR / route table and why do we use one here?**
+> User Defined Routes override Azure's system routes. We add `0.0.0.0/0 →
+> VirtualAppliance (firewall IP)` to force all spoke egress through the hub
+> Firewall for inspection. Without this, Azure would route outbound traffic
+> directly to the internet, bypassing the firewall.
+
+**3. What does `bgp_route_propagation_enabled = false` do?**
+> Prevents BGP routes learned from on-premises (via an ER/VPN gateway) from
+> being injected into the spoke's route table and potentially overriding the
+> explicit `0.0.0.0/0 → Firewall` UDR. You disable it to keep the firewall
+> route definitive.
+
+**4. Why set `private_endpoint_network_policies = "Disabled"` on the PE subnet?**
+> Azure normally evaluates NSG rules and route tables for private endpoint
+> traffic. Setting this to Disabled tells Azure to bypass that evaluation
+> specifically for private endpoints — required for them to receive traffic.
+
+**5. What is Azure Policy, and what's the difference between a Definition and an Assignment?**
+> A Policy Definition is a rule ("deny public network access on Key Vault").
+> An Assignment attaches that definition to a scope (MG, subscription, RG) with
+> optional parameters. Policies assigned at a management group automatically
+> apply to all subscriptions/RGs/resources beneath it — MG inheritance.
+
+**6. Why does `Contributor` not allow policy assignments?**
+> Contributor has `NotActions: Microsoft.Authorization/*/Write` (with narrow
+> exceptions). Azure deliberately separates resource management from governance
+> actions — someone who can create resources shouldn't automatically be able to
+> disable the policies constraining them. `Resource Policy Contributor` covers
+> `policyAssignments/write` separately.
+
+**7. How does the TFC speculative plan on a PR work?**
+> TFC's VCS integration listens to GitHub webhooks. When a PR is opened
+> targeting the workspace's configured branch (`master`), TFC runs a
+> speculative (read-only) plan against the PR branch's code and posts the
+> result as a GitHub commit status. Speculative plans can never apply — they're
+> always plan-only regardless of `auto_apply`.
+
+**8. Dev auto-applies on merge but test requires manual confirm — why is that the right design?**
+> Dev is the fast feedback loop — you want to see real infrastructure changes
+> quickly and catch bugs early. Test is a promotion gate — someone (or a
+> second engineer in a real team) reads the plan and consciously confirms it
+> before it touches a more sensitive environment. This mirrors Lloyds'
+> pattern: dev is self-service, prod/staging needs a platform engineer's
+> explicit sign-off. The PR review covers correctness; the apply confirmation
+> covers "is this the right time to change test?"
+
+---
+
+## Phase 2
+
+### Concept — Identity and Access Management (highest interview-value phase)
+
+Everything in this phase answers the question: **who or what is allowed to do
+what, and how does it prove who it is?** Four separate identity patterns are
+built here, each teaching a different part of the IAM model.
+
+#### Entra ID users and groups
+In a real bank, users come from on-premises Active Directory, synced to
+Entra ID via **Entra Connect** (or Cloud Sync). The HR system triggers a
+joiner/mover/leaver workflow in ServiceNow which creates the AD account; sync
+propagates it to Entra. We can't simulate the sync in a POC, so we create
+**cloud-only users** (no AD backing) that represent the same personas:
+
+- `admin-cortex@<tenant>` — Platform Admin
+- `svc-devops@<tenant>` — DevOps Engineer
+- `dev-alice@<tenant>` — Developer
+- `sec-audit@<tenant>` — Security/Audit
+
+**Security groups** (not Microsoft 365 groups — RBAC requires security groups):
+- `grp-cortex-platform-admins` → admin-cortex
+- `grp-cortex-devops`          → svc-devops
+- `grp-cortex-developers`      → dev-alice
+- `grp-cortex-security-audit`  → sec-audit
+
+**Why group-based RBAC, not user-based?** If you assign RBAC directly to
+users, every role change requires updating individual role assignments. With
+groups, you change group membership and all role assignments follow. At
+Lloyds, a new developer joining gets added to `grp-cortex-developers` in
+ServiceNow; their permissions across 50+ resource groups update automatically.
+
+#### Azure RBAC role assignments (group-based, scope-limited)
+```
+grp-cortex-platform-admins  → Contributor + User Access Admin  → rg-cortex-ai-dev/test
+grp-cortex-devops           → Contributor                      → rg-cortex-ai-dev/test
+                            → Reader                           → rg-cortex-ai-test
+grp-cortex-developers       → Reader                           → all infra
+                            → Contributor                      → rg-cortex-ai-dev only
+grp-cortex-security-audit   → Security Reader + Key Vault Reader → subscription
+```
+
+#### Managed identity (for the console app)
+A **user-assigned managed identity** for `services/console/`. The console
+uses this identity to access Azure resources (Key Vault, ACR, later Foundry
+through APIM) without any stored secret. Azure injects a short-lived token
+into the process at runtime.
+
+**System-assigned vs user-assigned:** System-assigned is tied to one resource's
+lifecycle (deleted when the resource is deleted). User-assigned is standalone
+and can be attached to multiple resources — right choice for the console because
+it will run both locally (Phase 4) and on AKS (Phase 6) and needs to keep its
+identity across redeploys.
+
+#### Service principal + OIDC federation (for GitHub Actions)
+GitHub Actions needs to push images to ACR, deploy to AKS, and read Key Vault
+in later phases. Same OIDC pattern we used for TFC:
+- One Entra app registration (`cortex-ai-gh-actions`)
+- Federated credential: trust tokens from `token.actions.githubusercontent.com`
+  where the subject matches our repo + branch/environment
+- No stored secret anywhere in GitHub or Azure
+
+#### Entra app registration (for the prod-access console feature)
+The prod-access button in the console creates an Entra app registration and
+returns the **Application (client) ID + tenant ID** to the requester. This
+is the core of the OAuth client-credentials flow:
+```
+app-reg created → produces client_id + tenant_id
+requester configures their workflow with these values
+workflow calls: POST /oauth/token with client_id + client_secret
+              → gets a Bearer token scoped to what the app-reg permits
+              → calls protected APIs with that token
+```
+
+#### Production patterns described, not built (PIM)
+In a bank, platform-admin and Owner roles are never directly assigned — they're
+**PIM-eligible**: a user requests elevation, it's time-limited (4 hours), it
+requires approval from a second person, and every elevation is audit-logged.
+Requires Entra ID P2. We use direct assignment in the POC and note this gap
+explicitly.
+
+### What we'll build
+- `infra/modules/iam/` — reusable module: users, groups, RBAC assignments
+- Entries in `infra/envs/dev/main.tf` that call the module
+- A GitHub Actions OIDC federated credential for the CI pipeline
+- `infra/bootstrap/tfc-cloud-setup/` updated with the GH Actions federated credential
+
+### Phase 2 comprehension check (answer before building)
+1. Why group-based RBAC instead of assigning roles directly to user identities?
+2. What's the difference between a managed identity and an app registration?
+3. Why is `User Access Administrator` needed alongside `Contributor` for the
+   platform-admin group — what does `Contributor` alone not allow you to do?

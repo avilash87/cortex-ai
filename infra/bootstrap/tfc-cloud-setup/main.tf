@@ -175,11 +175,10 @@ resource "tfe_workspace" "env" {
   organization = var.tfc_organization
 
   working_directory = "infra/envs/${each.key}"
-  # auto_apply = true: TFC applies automatically once the plan succeeds after a merge.
-  # Gate is the PR approval + required status checks in the GitHub ruleset.
-  # Lab-vs-production gap: Lloyds uses auto_apply=false with a separate manual
-  # approval step in TFC so a second engineer reviews the plan before apply.
-  auto_apply        = true
+  # dev: auto_apply=true, deploys immediately on merge (PR approval is the gate).
+  # test: auto_apply=false, requires a human to click Confirm & Apply in TFC UI
+  # after reviewing the plan — the promotion gate from dev to test.
+  auto_apply        = each.value.auto_apply
   terraform_version = "~> 1.15"
   queue_all_runs    = false
 
