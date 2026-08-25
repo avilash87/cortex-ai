@@ -51,10 +51,10 @@ resource "azurerm_role_assignment" "tfc_mg_reader" {
 }
 
 # ============================================================================
-# GITHUB REPOSITORY
-# Looks up (or creates) the repo and manages settings. Branch protection on a
-# private repo requires GitHub Pro — enforced instead via required GH Actions
-# status checks in Phase 5 (free on all plans).
+# GITHUB REPOSITORY + BRANCH RULESET
+# Repo is public — rulesets work on free GitHub accounts for public repos.
+# Ruleset enforces: no direct pushes to master, PR required, status checks
+# must pass (GH Actions fmt/validate/scan + TFC speculative plan).
 # ============================================================================
 data "github_repository" "cortex_ai" {
   count = var.create_github_repo ? 0 : 1
@@ -65,12 +65,70 @@ resource "github_repository" "cortex_ai" {
   count       = var.create_github_repo ? 1 : 0
   name        = var.github_repo_name
   description = "Cortex AI POC — Azure platform learning project"
-  visibility  = "private"
+  visibility  = "public"
   auto_init   = true
 }
 
 locals {
   repo_name = var.create_github_repo ? github_repository.cortex_ai[0].name : data.github_repository.cortex_ai[0].name
+}
+
+# Ruleset: only PR merges allowed on master; listed status checks must be green.
+# Lab-vs-production: in production a CODEOWNERS file + 2 reviewers minimum
+# and a separate "prod" environment with a required-reviewers gate would be added.
+resource "github_repository_ruleset" "master" {
+  name        = "master-branch-protection"
+  repository  = local.repo_name
+  target      = "branch"
+  enforcement = "active"
+
+  conditions {
+    ref_name {
+      include = ["refs/heads/master"]
+      exclude = []
+    }
+  }
+
+  rules {
+    # Block direct pushes and force-pushes to master
+    deletion         = true
+    non_fast_forward = true
+
+    # Require a PR with at least 1 approval
+    pull_request {
+      required_approving_review_count = 1
+      dismiss_stale_reviews_on_push   = true
+      require_code_owner_review       = false
+      require_last_push_approval      = false
+    }
+
+    # All four GH Actions jobs must be green before merge is allowed.
+    # 15368 = GitHub Actions app integration ID (constant across all repos).
+    required_status_checks {
+      strict_required_status_checks_policy = true
+
+      required_check {
+        context        = "fmt"
+        integration_id = 15368
+      }
+      required_check {
+        context        = "validate (dev)"
+        integration_id = 15368
+      }
+      required_check {
+        context        = "validate (test)"
+        integration_id = 15368
+      }
+      required_check {
+        context        = "security-scan"
+        integration_id = 15368
+      }
+      required_check {
+        context        = "opa-policy"
+        integration_id = 15368
+      }
+    }
+  }
 }
 
 # ============================================================================
@@ -96,7 +154,11 @@ resource "tfe_workspace" "env" {
   organization = var.tfc_organization
 
   working_directory = "infra/envs/${each.key}"
-  auto_apply        = false
+  # auto_apply = true: TFC applies automatically once the plan succeeds after a merge.
+  # Gate is the PR approval + required status checks in the GitHub ruleset.
+  # Lab-vs-production gap: Lloyds uses auto_apply=false with a separate manual
+  # approval step in TFC so a second engineer reviews the plan before apply.
+  auto_apply        = true
   terraform_version = "~> 1.15"
   queue_all_runs    = false
 
