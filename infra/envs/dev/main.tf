@@ -33,10 +33,21 @@ module "keyvault" {
   app_rg_name     = "rg-cortex-ai-dev"
   subscription_id = "5e131d1f-220b-4c15-a3b0-4d0009629b75"
   tags            = local.tags
+  vm_size         = var.management_vm_size
 
   # dev creates the shared management VM (WireGuard + Nexus), DNS zones, and the ACR
   create_management_vm = true
   create_dns_zones     = true
+}
+
+# Overridable without a code change: uksouth capacity for popular B/D-series SKUs
+# fluctuates. If a plan fails with SkuNotAvailable, set this as a TFC workspace
+# variable to a different size (e.g. Standard_A2_v2, Standard_F2s_v2) and re-run.
+# Standard_D2ns_v6 confirmed available for this subscription via:
+#   az vm list-skus --location uksouth --resource-type virtualMachines --all true
+variable "management_vm_size" {
+  type    = string
+  default = "Standard_D2ns_v6"
 }
 
 variable "initial_password" {
