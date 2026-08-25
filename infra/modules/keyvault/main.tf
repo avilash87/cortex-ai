@@ -55,11 +55,18 @@ resource "azurerm_key_vault" "this" {
     secret_permissions = ["Get", "List", "Set", "Delete"]
   }
 
-  # VM's managed-identity access policy is added in a follow-up change once
-  # the identity's principal_id is a known value in state (see main.tf VM
-  # identity block below) — azurerm_key_vault's access_policy is a Set-typed
-  # nested block and can't reference an unknown/not-yet-created principal_id
-  # in the same apply that creates it.
+  # Lets the management VM write/read secrets (e.g. its own SSH private key)
+  # via `az login --identity` — avoids interactive user auth on the VM,
+  # which Entra ID Security Defaults blocks for device-code flow anyway.
+  dynamic "access_policy" {
+    for_each = var.create_management_vm ? [1] : []
+    content {
+      tenant_id = data.azurerm_client_config.current.tenant_id
+      object_id = azurerm_linux_virtual_machine.management[0].identity[0].principal_id
+
+      secret_permissions = ["Get", "Set"]
+    }
+  }
 }
 
 # SSH private key is stored in TFC state (encrypted at rest by HCP Terraform).
