@@ -998,3 +998,117 @@ explicitly.
 2. What's the difference between a managed identity and an app registration?
 3. Why is `User Access Administrator` needed alongside `Contributor` for the
    platform-admin group — what does `Contributor` alone not allow you to do?
+
+---
+
+## Phase 2 — Complete: IAM
+
+### What we built (27 resources applied)
+
+| Resource | Count | Notes |
+|---|---|---|
+| `azuread_user` | 4 | admin-cortex, svc-devops, dev-alice, sec-audit |
+| `azuread_group` | 4 | grp-cortex-{platform-admins,devops,developers,security-audit} |
+| `azuread_group_member` | 4 | each user placed in their group |
+| `azurerm_role_assignment` (persona RBAC) | 10 | group-based, scope-limited per the RBAC table |
+| `azurerm_role_assignment` (GH Actions) | 2 | Contributor on dev + test RG |
+| `azurerm_user_assigned_identity` | 1 | mid-cortex-console-dev |
+| `azurerm_role_assignment` (managed identity) | 1 | Key Vault Secrets User on dev RG |
+| `azuread_application` (prod-access) | 1 | cortex-ai-prod-access-dev |
+| `azuread_service_principal` (prod-access) | 1 | attached to prod-access app |
+
+**Bootstrap changes applied separately (local state):**
+- Microsoft Graph API permissions granted + admin-consented for both TFC SPNs: `User.ReadWrite.All`, `Group.ReadWrite.All`, `GroupMember.ReadWrite.All`, `Application.ReadWrite.All`
+- `User Access Administrator` at subscription scope for both TFC SPNs (needed to write `roleAssignments/write`)
+- GitHub Actions app registration + 3 federated credentials (PR, dev env, test env)
+
+### Permissions learned the hard way
+- `Contributor` explicitly excludes `Microsoft.Authorization/*/Write` — cannot create role assignments. Requires `User Access Administrator` additionally.
+- Microsoft Graph API permissions (create users, groups, app regs) are completely separate from Azure RBAC — they live in Entra and need `azuread_app_role_assignment` with admin consent, not an Azure role assignment.
+- `azuread_domains` data source requires `Domain.Read.All` Graph permission — avoided by using a `tenant_domain` variable instead (domain never changes).
+
+### Phase 2 interview answers
+
+**1. Why group-based RBAC?**
+> A new developer joining gets added to `grp-cortex-developers` — their access to all 50+ RGs updates automatically. With direct user assignments you'd need to update every scope individually. It also makes audits clean: you query group membership to see who has what access, instead of scanning every role assignment across the entire subscription.
+
+**2. Managed identity vs app registration?**
+> Managed identity = Azure-managed identity for an Azure-hosted resource (VM, AKS pod, Function). No secret to handle; token injected at runtime by the Azure platform. App registration = defines an application in Entra ID, produces a client ID and tenant ID, used by external systems or service-to-service flows (OAuth client credentials). The console uses a managed identity to access Azure resources (Key Vault) without secrets; the prod-access feature returns an app registration's client ID to a human who needs a service identity with a secret.
+
+**3. Why User Access Administrator alongside Contributor?**
+> `Contributor` grants all resource management actions BUT explicitly excludes `Microsoft.Authorization/*/Write`. Assigning roles is an authorization action, not a resource management action — Azure separates these by design so a compromised Contributor credential can't remove the governance policies and role assignments constraining it. `User Access Administrator` fills that gap specifically for role assignment management.
+
+---
+
+## Phase 3
+
+### Concept — VM, SSH keys, Key Vault, ACR, Nexus, WireGuard
+
+#### The Terraform SSH key pattern
+`tls_private_key` generates an RSA or ECDSA keypair in Terraform state. The public key goes to the VM (`admin_ssh_key` block). The private key goes to Key Vault (never output to console, never in source code). This is the exact pattern your LSEG assessment tested:
+
+```hcl
+resource "tls_private_key" "vm" {
+  algorithm = "RSA"
+  rsa_bits  = 4096
+}
+
+resource "azurerm_key_vault_secret" "vm_private_key" {
+  name         = "vm-ssh-private-key"
+  value        = tls_private_key.vm.private_key_pem  # stored in KV, not in code
+  key_vault_id = azurerm_key_vault.this.id
+}
+
+resource "azurerm_linux_virtual_machine" "mgmt" {
+  admin_ssh_key {
+    username   = "azureuser"
+    public_key = tls_private_key.vm.public_key_openssh
+  }
+}
+```
+
+**Lab vs production:** in production you'd generate the key externally (not in Terraform state) and import only the public key. Having the private key in TFC state is acceptable for a POC; TFC encrypts state at rest.
+
+#### Key Vault and the Phase 1 Azure Policy
+The policy we assigned at `mg-cortex-corp` in Phase 1 ("Deny public network access on Key Vault") now forces our hand: any Key Vault created in this subscription must set `network_acls` to deny public traffic. TFC's plan will fail with `RequestDisallowedByPolicy` if we forget this. This is exactly how Azure Policy is supposed to work — it enforces the guardrail automatically.
+
+```hcl
+resource "azurerm_key_vault" "this" {
+  network_acls {
+    bypass         = "AzureServices"
+    default_action = "Deny"   # required by our Phase 1 policy
+  }
+}
+```
+
+#### ACR (Azure Container Registry)
+Private Docker registry in Azure. All container images go here — never directly to Docker Hub in production. The console's Dockerfile (Phase 4) builds locally, CI (Phase 5) pushes to ACR, AKS (Phase 6) pulls from ACR. The managed identity we created in Phase 2 gets `AcrPull` on the registry.
+
+#### Azure Bastion vs VPN Gateway for VM admin
+- **Azure Bastion:** browser-based SSH/RDP proxied through the portal. No public IP on the VM, no inbound port 22. ~$0.19/hr (Basic SKU). Perfect for occasional admin.
+- **VPN Gateway P2S:** a full VPN tunnel from your laptop into the VNet — all traffic routed through the Azure network. ~$0.04/hr (Basic SKU). Needed when you want to access *all* private endpoints from your laptop, not just a specific VM.
+
+Phase 3 uses Bastion for the VM. Phase 9 adds the VPN Gateway.
+
+#### WireGuard — self-hosted corporate VPN simulation
+WireGuard runs as a Docker container on the management VM. It acts as the VPN gateway:
+- VM sits in `snet-management-tools` in the hub (10.0.4.0/24), peered to all spokes
+- VM has a public IP (just for WireGuard UDP/51820)
+- Your laptop installs the WireGuard client, imports the config
+- Once connected: your laptop gets a virtual IP in the hub range and can reach every private endpoint across all spoke VNets
+- DNS = hub resolver inbound IP → private endpoint names resolve to private IPs
+
+This is the same concept as Lloyds Atmos — a VPN gateway that routes your machine onto the corporate network.
+
+#### Nexus Repository OSS — artifact proxy
+Runs alongside WireGuard via Docker Compose on the same VM. Acts as a proxy for:
+- Docker Hub (base images)
+- PyPI (Python packages)
+- The public Terraform Registry (providers)
+
+All pipeline builds pull through Nexus, never directly from the internet. This is the CLAUDE.md "Nexus chokepoint" — a supply chain security control so no unvetted package can enter the build pipeline without going through a controlled proxy.
+
+### Phase 3 comprehension check (answer before building)
+1. Why does the private SSH key go to Key Vault and not to a Terraform output?
+2. Our Phase 1 Azure Policy says "Deny public network access on Key Vault." What will happen at plan time if we create a Key Vault without the `network_acls` block?
+3. WireGuard's NSG rule allows `source = "*"` on UDP/51820. Why is this acceptable despite Trivy flagging it as CRITICAL?
