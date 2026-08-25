@@ -170,11 +170,16 @@ resource "azurerm_route_table" "sandbox" {
   bgp_route_propagation_enabled = false
   tags                          = var.tags
 
+  # TEMPORARY (Phase 3 -> Phase 9): snet-general hosts the management VM,
+  # which needs real internet egress to bootstrap Docker/az-cli/WireGuard/
+  # Nexus. Forcing 0.0.0.0/0 at the still-nonexistent firewall placeholder
+  # blackholes that traffic entirely. Revert this route back to
+  # VirtualAppliance / var.hub_firewall_private_ip once Phase 9 stands up
+  # the real Azure Firewall.
   route {
-    name                   = "default-via-firewall"
-    address_prefix         = "0.0.0.0/0"
-    next_hop_type          = "VirtualAppliance"
-    next_hop_in_ip_address = var.hub_firewall_private_ip
+    name           = "default-via-firewall"
+    address_prefix = "0.0.0.0/0"
+    next_hop_type  = "Internet"
   }
 }
 
