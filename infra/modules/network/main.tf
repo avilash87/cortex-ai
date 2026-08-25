@@ -112,7 +112,10 @@ resource "azurerm_network_security_group" "sandbox" {
     destination_port_range     = "22"
   }
 
-  # WireGuard UDP port
+  # WireGuard UDP port. Source is intentionally 0.0.0.0/0 — a home broadband IP
+  # isn't static and can't be pinned in advance. WireGuard's own cryptographic
+  # handshake authenticates connections; this is not an unauthenticated port.
+  # Suppressed in .trivyignore (AVD-AZU-0047) with the same justification.
   security_rule {
     name                       = "AllowWireGuard"
     priority                   = 110

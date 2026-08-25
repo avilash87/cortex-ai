@@ -12,12 +12,12 @@ module "network" {
   tags     = local.tags
 }
 
-# =============================================================================
+# ==============================================================================
 # AZURE POLICY ASSIGNMENTS
 # Assigned at mg-cortex-corp so they apply to our subscription automatically
 # via MG inheritance. Policy definitions are built-in (no custom definition
 # needed) — Azure ships hundreds; we pick the relevant ones.
-# =============================================================================
+# ==============================================================================
 
 data "azurerm_management_group" "corp" {
   name = "mg-cortex-corp"
