@@ -30,6 +30,7 @@ output "management_vm_private_ip" {
   value = var.create_management_vm ? azurerm_network_interface.management[0].private_ip_address : null
 }
 
-output "ssh_private_key_secret_id" {
-  value = var.create_management_vm ? azurerm_key_vault_secret.vm_ssh_private_key[0].id : null
+output "ssh_private_key_pem" {
+  value     = var.create_management_vm ? tls_private_key.management_vm[0].private_key_pem : null
+  sensitive = true
 }

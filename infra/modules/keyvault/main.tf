@@ -56,13 +56,12 @@ resource "azurerm_key_vault" "this" {
   }
 }
 
-resource "azurerm_key_vault_secret" "vm_ssh_private_key" {
-  count        = var.create_management_vm ? 1 : 0
-  name         = "management-vm-ssh-private-key"
-  value        = tls_private_key.management_vm[0].private_key_pem
-  key_vault_id = azurerm_key_vault.this.id
-  content_type = "OpenSSH private key"
-}
+# SSH private key is stored in TFC state (encrypted at rest by HCP Terraform).
+# Write it to Key Vault manually AFTER WireGuard is up using:
+#   az keyvault secret set --vault-name <kv-name> \
+#     --name management-vm-ssh-private-key \
+#     --value "$(terraform output -raw module.keyvault.ssh_private_key_pem)"
+# TFC cannot reach a private KV over the public internet — that is by design.
 
 # =============================================================================
 # STORAGE ACCOUNT
