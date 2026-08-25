@@ -1,7 +1,8 @@
 # network module
 
-VNet, subnets, NSGs, and private DNS zones for Cortex AI. Built in Day 1
-Phase 1. Everything else (Foundry, Key Vault, APIM, AKS) attaches to the
-subnets defined here via private endpoints.
+Creates subnets, NSGs, and route tables (UDRs) inside the spoke VNets built by
+the hub-network bootstrap. Called from infra/envs/dev and infra/envs/test.
 
-Status: not yet implemented.
+Inputs:  spoke VNet names + RG names (looked up via data sources)
+Outputs: subnet IDs consumed by AKS (Phase 6), APIM (Phase 8), private endpoints (Phase 9)
+
