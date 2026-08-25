@@ -167,9 +167,9 @@ resource "azurerm_linux_virtual_machine" "management" {
   }
 }
 
-# Azure Bastion — browser-based SSH/RDP with no public port 22 on the VM.
-# Only created alongside the management VM (create_management_vm = true).
-# Cost: ~$0.19/hr (Basic SKU) — destroy when not actively using it.
+# Azure Bastion — browser-based or native-client SSH/RDP with no public port
+# 22 on the VM. Only created alongside the management VM (create_management_vm
+# = true). Cost: ~$0.29/hr (Standard SKU) — destroy when not actively using it.
 resource "azurerm_subnet" "bastion" {
   count                = var.create_management_vm ? 1 : 0
   name                 = "AzureBastionSubnet"
@@ -193,8 +193,12 @@ resource "azurerm_bastion_host" "management" {
   name                = "bastion-cortex-${var.env}"
   location            = var.location
   resource_group_name = var.management_rg_name
-  sku                 = "Basic"
-  tags                = var.tags
+  # Standard (not Basic): enables native client connections (az network bastion
+  # ssh), so SSH can run over a local CLI tunnel instead of the browser
+  # WebSocket session — a fallback for browser/OS-level WebSocket issues.
+  sku               = "Standard"
+  tunneling_enabled = true
+  tags              = var.tags
 
   ip_configuration {
     name                 = "bastion-config"
