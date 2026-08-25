@@ -1,0 +1,23 @@
+# Nexus OSS — the "chokepoint" proxy CLAUDE.md requires: every Docker base
+# image / PyPI package / Terraform provider pull should route through this,
+# never straight to the public internet, so a compromised upstream package
+# can be caught/blocked in one place instead of at every pull site.
+#
+# Deploy on vm-cortex-management-dev only, manual/ephemeral like WireGuard —
+# not Terraform- or CI-managed. Powered on only while studying.
+#
+# First pull is direct from Docker Hub, not through Nexus itself — Nexus
+# can't proxy its own bootstrap image. Flagged per the same Nexus-chokepoint
+# rule as the WireGuard image pull.
+services:
+  nexus:
+    image: sonatype/nexus3:latest
+    container_name: nexus
+    ports:
+      - "8081:8081" # web UI + repo endpoints
+    volumes:
+      - nexus-data:/nexus-data
+    restart: unless-stopped
+
+volumes:
+  nexus-data:
