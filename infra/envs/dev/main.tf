@@ -27,6 +27,13 @@ module "iam" {
   gh_actions_sp_object_id = var.gh_actions_sp_object_id
 }
 
+module "keyvault" {
+  source          = "../../modules/keyvault"
+  location        = "uksouth"
+  subscription_id = "5e131d1f-220b-4c15-a3b0-4d0009629b75"
+  tags            = local.tags
+}
+
 variable "initial_password" {
   description = "Initial password for test Entra ID users — set as a sensitive TFC workspace variable"
   type        = string
