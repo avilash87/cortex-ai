@@ -17,6 +17,17 @@ data "azurerm_subnet" "sandbox_private_endpoints" {
   resource_group_name  = var.sandbox_spoke_rg_name
 }
 
+# The hub is where dnspr-hub-cortex-dev (Azure DNS Private Resolver) lives —
+# needed so a VPN-connected client (WireGuard, Phase 9's P2S VPN) resolving
+# through the resolver's inbound endpoint can see these private DNS zones.
+# Being linked to the sandbox spoke alone only lets resources *inside* the
+# sandbox spoke resolve them — not external clients querying the resolver.
+data "azurerm_virtual_network" "hub" {
+  count               = var.create_dns_zones ? 1 : 0
+  name                = var.hub_vnet_name
+  resource_group_name = var.hub_rg_name
+}
+
 resource "random_string" "suffix" {
   length  = 5
   special = false
@@ -297,6 +308,36 @@ resource "azurerm_private_dns_zone_virtual_network_link" "acr" {
   resource_group_name   = var.management_rg_name
   private_dns_zone_name = azurerm_private_dns_zone.acr[0].name
   virtual_network_id    = data.azurerm_virtual_network.sandbox.id
+  registration_enabled  = false
+}
+
+# Same three zones, also linked to the hub — required for
+# dnspr-hub-cortex-dev's inbound endpoint (used by WireGuard/VPN clients) to
+# resolve them. See the hub data source above for why.
+resource "azurerm_private_dns_zone_virtual_network_link" "key_vault_hub" {
+  count                 = var.create_dns_zones ? 1 : 0
+  name                  = "link-kv-hub"
+  resource_group_name   = var.management_rg_name
+  private_dns_zone_name = azurerm_private_dns_zone.key_vault[0].name
+  virtual_network_id    = data.azurerm_virtual_network.hub[0].id
+  registration_enabled  = false
+}
+
+resource "azurerm_private_dns_zone_virtual_network_link" "blob_hub" {
+  count                 = var.create_dns_zones ? 1 : 0
+  name                  = "link-blob-hub"
+  resource_group_name   = var.management_rg_name
+  private_dns_zone_name = azurerm_private_dns_zone.blob[0].name
+  virtual_network_id    = data.azurerm_virtual_network.hub[0].id
+  registration_enabled  = false
+}
+
+resource "azurerm_private_dns_zone_virtual_network_link" "acr_hub" {
+  count                 = var.create_dns_zones ? 1 : 0
+  name                  = "link-acr-hub"
+  resource_group_name   = var.management_rg_name
+  private_dns_zone_name = azurerm_private_dns_zone.acr[0].name
+  virtual_network_id    = data.azurerm_virtual_network.hub[0].id
   registration_enabled  = false
 }
 

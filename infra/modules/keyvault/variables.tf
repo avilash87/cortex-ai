@@ -44,6 +44,19 @@ variable "sandbox_general_subnet_name" {
   default = "snet-general"
 }
 
+# Hub VNet lives in infra/bootstrap/hub-network/ (separate local-state
+# Terraform, not part of this module graph) — referenced here by name/RG,
+# same pattern as the sandbox spoke above.
+variable "hub_rg_name" {
+  type    = string
+  default = "rg-cortex-connectivity-dev"
+}
+
+variable "hub_vnet_name" {
+  type    = string
+  default = "vnet-hub-cortex-dev"
+}
+
 variable "sandbox_private_endpoints_subnet_name" {
   type    = string
   default = "snet-private-endpoints"
