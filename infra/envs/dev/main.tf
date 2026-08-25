@@ -12,6 +12,45 @@ module "network" {
   tags     = local.tags
 }
 
+module "iam" {
+  source   = "../../modules/iam"
+  env      = "dev"
+  location = "uksouth"
+  tags     = local.tags
+
+  # initial_password is a sensitive TFC workspace variable — set it at:
+  # app.terraform.io → cortex-ai-dev → Variables → add "initial_password" (sensitive, Terraform var)
+  initial_password = var.initial_password
+
+  # Set this after running: terraform apply in infra/bootstrap/tfc-cloud-setup
+  # then: terraform output gh_actions_sp_object_id
+  gh_actions_sp_object_id = var.gh_actions_sp_object_id
+}
+
+module "keyvault" {
+  source          = "../../modules/keyvault"
+  env             = "dev"
+  app_rg_name     = "rg-cortex-ai-dev"
+  subscription_id = "5e131d1f-220b-4c15-a3b0-4d0009629b75"
+  tags            = local.tags
+
+  # dev creates the shared management VM (WireGuard + Nexus), DNS zones, and the ACR
+  create_management_vm = true
+  create_dns_zones     = true
+}
+
+variable "initial_password" {
+  description = "Initial password for test Entra ID users — set as a sensitive TFC workspace variable"
+  type        = string
+  sensitive   = true
+}
+
+variable "gh_actions_sp_object_id" {
+  description = "GitHub Actions SPN object ID from tfc-cloud-setup bootstrap output"
+  type        = string
+  default     = ""
+}
+
 # ==============================================================================
 # AZURE POLICY ASSIGNMENTS
 # Assigned at mg-cortex-corp so they apply to our subscription automatically
