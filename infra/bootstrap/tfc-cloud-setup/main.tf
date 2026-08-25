@@ -32,6 +32,41 @@ resource "azuread_application_federated_identity_credential" "apply" {
   subject        = "organization:${var.tfc_organization}:project:${var.tfc_project}:workspace:${each.value.workspace_name}:run_phase:apply"
 }
 
+# =============================================================================
+# GITHUB ACTIONS OIDC — Phase 2 addition
+# Same pattern as TFC OIDC: no stored secret, trust is the federated credential.
+# Issuer is GitHub's OIDC provider (not app.terraform.io).
+# Three credentials: one for PR checks (any branch), one for CD per env.
+# RBAC grants for this SPN live in infra/modules/iam/ (per-env, via TFC).
+# =============================================================================
+resource "azuread_application" "gh_actions" {
+  display_name = "cortex-ai-gh-actions"
+}
+
+resource "azuread_service_principal" "gh_actions" {
+  client_id = azuread_application.gh_actions.client_id
+}
+
+resource "azuread_application_federated_identity_credential" "gh_pr" {
+  application_id = azuread_application.gh_actions.id
+  display_name   = "gh-pr-checks"
+  description    = "GitHub Actions CI — runs on any PR to validate infra before merge"
+  audiences      = ["api://AzureADTokenExchange"]
+  issuer         = "https://token.actions.githubusercontent.com"
+  subject        = "repo:${var.github_owner}/${var.github_repo_name}:pull_request"
+}
+
+resource "azuread_application_federated_identity_credential" "gh_env" {
+  for_each       = var.envs
+  application_id = azuread_application.gh_actions.id
+  display_name   = "gh-env-${each.key}"
+  description    = "GitHub Actions CD — runs when deploying to the ${each.key} environment"
+  audiences      = ["api://AzureADTokenExchange"]
+  issuer         = "https://token.actions.githubusercontent.com"
+  # environment: scoped to a named GitHub Environment — phase 5 creates dev + test environments
+  subject = "repo:${var.github_owner}/${var.github_repo_name}:environment:${each.key}"
+}
+
 # Scoped to subscription so the management-group bootstrap (which runs second and creates
 # the RGs) does not need to know TFC SPN object IDs in advance.
 resource "azurerm_role_assignment" "tfc_contributor" {
