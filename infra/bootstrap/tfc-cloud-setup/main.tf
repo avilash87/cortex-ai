@@ -50,6 +50,16 @@ resource "azurerm_role_assignment" "tfc_mg_reader" {
   principal_id         = azuread_service_principal.tfc[each.key].object_id
 }
 
+# Policy assignment writes are explicitly excluded from Contributor — Azure treats
+# governance/authorization actions separately from resource management. This role
+# grants exactly Microsoft.Authorization/policyAssignments/* at the MG scope.
+resource "azurerm_role_assignment" "tfc_mg_policy_contributor" {
+  for_each             = var.envs
+  scope                = "/providers/Microsoft.Management/managementGroups/mg-cortex-corp"
+  role_definition_name = "Resource Policy Contributor"
+  principal_id         = azuread_service_principal.tfc[each.key].object_id
+}
+
 # ============================================================================
 # GITHUB REPOSITORY + BRANCH RULESET
 # Repo is public — rulesets work on free GitHub accounts for public repos.
@@ -102,32 +112,43 @@ resource "github_repository_ruleset" "master" {
       require_last_push_approval      = false
     }
 
-    # All four GH Actions jobs must be green before merge is allowed.
+    # Context strings must match each job's *display* name exactly (the `name:`
+    # field in infra-pr.yml), not the job id — GitHub Actions reports check runs
+    # under the display name. Matrix jobs get "(<matrix value>)" auto-appended.
     # 15368 = GitHub Actions app integration ID (constant across all repos).
     required_status_checks {
       strict_required_status_checks_policy = true
 
       required_check {
-        context        = "fmt"
+        context        = "Terraform format"
         integration_id = 15368
       }
       required_check {
-        context        = "validate (dev)"
+        context        = "Terraform validate (dev)"
         integration_id = 15368
       }
       required_check {
-        context        = "validate (test)"
+        context        = "Terraform validate (test)"
         integration_id = 15368
       }
       required_check {
-        context        = "security-scan"
+        context        = "Trivy IaC scan"
         integration_id = 15368
       }
       required_check {
-        context        = "opa-policy"
+        context        = "OPA / Conftest policy check"
         integration_id = 15368
       }
     }
+  }
+
+  # Repo admin (you, working standalone) can merge without waiting for a
+  # separate approver or all checks — useful for solo work. Team/production
+  # setups would remove this bypass so no single person can self-approve.
+  bypass_actors {
+    actor_id    = 5 # built-in "Admin" repository role
+    actor_type  = "RepositoryRole"
+    bypass_mode = "always"
   }
 }
 
