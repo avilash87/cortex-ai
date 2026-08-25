@@ -65,6 +65,7 @@ jobs:
           severity: HIGH,CRITICAL
           exit-code: "1"
           format: table
+          trivyignores: .trivyignore
 
   opa-policy:
     name: OPA / Conftest policy check

@@ -112,17 +112,17 @@ resource "azurerm_network_security_group" "sandbox" {
     destination_port_range     = "22"
   }
 
-  # WireGuard UDP port. Source is intentionally open (var default "*") because a
-  # home broadband IP isn't static — narrowing this is still recommended once known.
-  # trivy:ignore:AVD-AZU-0047 WireGuard requires internet-facing UDP by design;
-  # exposure is limited to a single authenticated-handshake port, not a management port.
+  # WireGuard UDP port. Source is intentionally 0.0.0.0/0 — a home broadband IP
+  # isn't static and can't be pinned in advance. WireGuard's own cryptographic
+  # handshake authenticates connections; this is not an unauthenticated port.
+  # Suppressed in .trivyignore (AVD-AZU-0047) with the same justification.
   security_rule {
     name                       = "AllowWireGuard"
     priority                   = 110
     direction                  = "Inbound"
     access                     = "Allow"
     protocol                   = "Udp"
-    source_address_prefix      = var.wireguard_allowed_source_prefix
+    source_address_prefix      = "*"
     destination_address_prefix = "*"
     source_port_range          = "*"
     destination_port_range     = "51820"

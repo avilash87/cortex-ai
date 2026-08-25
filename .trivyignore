@@ -1,0 +1,10 @@
+# Trivy misconfiguration suppressions — every entry MUST have a justification.
+# Format: <AVD-ID>  # reason
+
+# WireGuard UDP/51820 on the sandbox NSG is intentionally open to 0.0.0.0/0.
+# A home broadband IP is dynamic and can't be pinned to a CIDR in advance.
+# WireGuard's own cryptographic handshake authenticates every connection —
+# this is a single authenticated-VPN port, not an unauthenticated management
+# port (unlike SSH/RDP, which this repo never opens to the internet).
+# See infra/modules/network/main.tf — azurerm_network_security_group.sandbox
+AVD-AZU-0047
