@@ -43,9 +43,11 @@ module "keyvault" {
 # Overridable without a code change: uksouth capacity for popular B/D-series SKUs
 # fluctuates. If a plan fails with SkuNotAvailable, set this as a TFC workspace
 # variable to a different size (e.g. Standard_A2_v2, Standard_F2s_v2) and re-run.
+# Standard_D2ns_v6 confirmed available for this subscription via:
+#   az vm list-skus --location uksouth --resource-type virtualMachines --all true
 variable "management_vm_size" {
   type    = string
-  default = "Standard_B1ms"
+  default = "Standard_D2ns_v6"
 }
 
 variable "initial_password" {
