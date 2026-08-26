@@ -25,6 +25,8 @@ module "iam" {
   # Set this after running: terraform apply in infra/bootstrap/tfc-cloud-setup
   # then: terraform output gh_actions_sp_object_id
   gh_actions_sp_object_id = var.gh_actions_sp_object_id
+
+  acr_id = module.keyvault.acr_id
 }
 
 module "keyvault" {

@@ -53,6 +53,15 @@ variable "gh_actions_sp_object_id" {
   default     = "" # set once Phase 2 bootstrap apply has run
 }
 
+# Contributor alone doesn't include ACR's data-plane push action - admin_enabled
+# is deliberately false on the registry (CLAUDE.md security posture), so
+# `docker push`/`az acr login` via AAD token needs this explicit role.
+variable "acr_id" {
+  description = "ACR resource ID - grants gh_actions AcrPush there (Phase 5 CD)"
+  type        = string
+  default     = ""
+}
+
 variable "personas" {
   description = "Test user personas — cloud-only Entra ID users simulating an on-prem AD sync"
   type = map(object({
