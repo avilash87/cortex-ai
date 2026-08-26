@@ -94,6 +94,14 @@ resource "azurerm_role_assignment" "gh_actions_test_contributor" {
   principal_id         = var.gh_actions_sp_object_id
 }
 
+resource "azurerm_role_assignment" "gh_actions_acr_push" {
+  count = var.gh_actions_sp_object_id != "" && var.acr_id != "" ? 1 : 0
+
+  scope                = var.acr_id
+  role_definition_name = "AcrPush"
+  principal_id         = var.gh_actions_sp_object_id
+}
+
 # =============================================================================
 # USER-ASSIGNED MANAGED IDENTITY — for the console application
 # User-assigned (not system-assigned) so the identity persists across redeploys
