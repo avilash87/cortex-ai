@@ -22,9 +22,13 @@ variable "aks_subnet_id" {
   type        = string
 }
 
+# Standard_B2s is not allowed in this subscription/region at all (same
+# blanket-restriction pattern hit for the management VM in Phase 3, not a
+# quota issue). Standard_D2ns_v6 confirmed available via the actual
+# 400 response's allowed-SKU list, and already proven working for the VM.
 variable "node_vm_size" {
   type    = string
-  default = "Standard_B2s"
+  default = "Standard_D2ns_v6"
 }
 
 variable "node_count" {
