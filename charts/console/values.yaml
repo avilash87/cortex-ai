@@ -1,0 +1,26 @@
+image:
+  repository: acrcortexvx54b.azurecr.io/cortex-console
+  tag: dev # mutable tag services-cd.yml pushes on every merge; pin to a sha for anything more permanent
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+service:
+  port: 8000
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+serviceAccount:
+  name: cortex-console
+  # Must match azurerm_federated_identity_credential.console_workload_identity's
+  # subject exactly: system:serviceaccount:<namespace>:<this name>. Deploying
+  # to any namespace other than "dev" breaks workload identity federation
+  # silently (the pod just never gets a token) unless a matching federated
+  # credential exists for that namespace too.
+  workloadIdentityClientId: a8ebb036-a36a-4fa2-83fd-e156151c2ba5

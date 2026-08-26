@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   lint:
-    name: Lint (ruff + hadolint)
+    name: Lint (ruff + hadolint + helm lint)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +31,11 @@ jobs:
         uses: hadolint/hadolint-action@v3.1.0
         with:
           dockerfile: services/console/Dockerfile
+
+      - uses: azure/setup-helm@v4
+
+      - name: helm lint
+        run: helm lint charts/console/
 
   test:
     name: Test (pytest)
@@ -82,7 +87,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   scan-sca-iac:
-    name: Trivy (Python deps + Dockerfile misconfig)
+    name: Trivy (Python deps + Dockerfile + Helm chart misconfig)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -100,6 +105,14 @@ jobs:
         with:
           scan-type: config
           scan-ref: services/console
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+      - name: Trivy config scan (Helm chart misconfig - IaC)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: charts/console
           severity: HIGH,CRITICAL
           exit-code: "1"
 
