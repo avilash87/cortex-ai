@@ -83,6 +83,33 @@ resource "azurerm_role_assignment" "management_vm_aks_admin" {
   principal_id         = module.keyvault.management_vm_identity_principal_id
 }
 
+# Same role, for GitHub Actions' identity - services-cd.yml's deploy jobs
+# need this to run `az aks get-credentials` + `helm upgrade --install` for
+# real. Those jobs also run on the self-hosted runner (same reason as
+# build-and-push: the API server's authorized_ip_ranges restriction means
+# a GitHub-hosted runner has no path to the cluster at all).
+resource "azurerm_role_assignment" "gh_actions_aks_admin" {
+  count = var.gh_actions_sp_object_id != "" ? 1 : 0
+
+  scope                = module.aks.cluster_id
+  role_definition_name = "Azure Kubernetes Service Cluster Admin Role"
+  principal_id         = var.gh_actions_sp_object_id
+}
+
+# Second federated credential for the "test" namespace - without this,
+# deploying the chart into a test namespace would hit the exact silent
+# failure the chart's own README warns about: the ServiceAccount's subject
+# wouldn't match any federated credential, and the pod would just never
+# get a workload identity token, no error at deploy time.
+resource "azurerm_federated_identity_credential" "console_workload_identity_test" {
+  name                = "console-workload-identity-test"
+  resource_group_name = "rg-cortex-ai-dev"
+  parent_id           = module.iam.managed_identity_id
+  audience            = ["api://AzureADTokenExchange"]
+  issuer              = module.aks.oidc_issuer_url
+  subject             = "system:serviceaccount:test:cortex-console"
+}
+
 # Overridable without a code change: uksouth capacity for popular B/D-series SKUs
 # fluctuates. If a plan fails with SkuNotAvailable, set this as a TFC workspace
 # variable to a different size (e.g. Standard_A2_v2, Standard_F2s_v2) and re-run.
