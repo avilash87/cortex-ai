@@ -62,6 +62,27 @@ variable "sandbox_private_endpoints_subnet_name" {
   default = "snet-private-endpoints"
 }
 
+# AI spoke - AKS nodes (Phase 6) live here, a different VNet from the
+# sandbox spoke with no direct route between them (hub-spoke only peers
+# hub<->spoke, never spoke<->spoke). Needs its own private endpoint + DNS
+# zone link for ACR, same as the hub link added in Phase 4 for the same
+# underlying reason (a resolver/client outside the zone-linked VNet can't
+# see the zone at all).
+variable "ai_spoke_rg_name" {
+  type    = string
+  default = "rg-cortex-spoke-ai-dev"
+}
+
+variable "ai_spoke_vnet_name" {
+  type    = string
+  default = "vnet-spoke-ai-cortex-dev"
+}
+
+variable "ai_private_endpoints_subnet_name" {
+  type    = string
+  default = "snet-private-endpoints"
+}
+
 variable "vm_size" {
   type    = string
   default = "Standard_D2ns_v6"

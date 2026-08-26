@@ -17,6 +17,19 @@ data "azurerm_subnet" "sandbox_private_endpoints" {
   resource_group_name  = var.sandbox_spoke_rg_name
 }
 
+data "azurerm_virtual_network" "ai" {
+  count               = var.create_dns_zones ? 1 : 0
+  name                = var.ai_spoke_vnet_name
+  resource_group_name = var.ai_spoke_rg_name
+}
+
+data "azurerm_subnet" "ai_private_endpoints" {
+  count                = var.create_dns_zones ? 1 : 0
+  name                 = var.ai_private_endpoints_subnet_name
+  virtual_network_name = data.azurerm_virtual_network.ai[0].name
+  resource_group_name  = var.ai_spoke_rg_name
+}
+
 # The hub is where dnspr-hub-cortex-dev (Azure DNS Private Resolver) lives —
 # needed so a VPN-connected client (WireGuard, Phase 9's P2S VPN) resolving
 # through the resolver's inbound endpoint can see these private DNS zones.
@@ -402,5 +415,60 @@ resource "azurerm_private_endpoint" "acr" {
   private_dns_zone_group {
     name                 = "default"
     private_dns_zone_ids = [local.acr_zone_id]
+  }
+}
+
+# Second private endpoint for the SAME registry, this time in the AI spoke -
+# AKS nodes (Phase 6) live there, a different VNet from the sandbox spoke
+# with no direct route between them. Without this, node image pulls resolve
+# ACR's public IP (no zone link = no visibility into the private DNS zone,
+# same mechanism as the Phase 4 hub DNS bug) and get a real 403 from ACR's
+# gateway, since public access is disabled - confirmed via a real failed
+# pod (ErrImagePull / ImagePullBackOff) before writing this fix.
+# A SEPARATE private DNS zone (same domain name, different zone resource -
+# Azure scopes zone uniqueness to name+resource-group, so this is legal and
+# is the standard pattern here) rather than reusing the shared
+# privatelink.azurecr.io zone in rg-cortex-management-dev. Reusing that
+# shared zone would register a second A record for the same hostname in
+# one zone linked to multiple VNets - DNS has no notion of "which VNet is
+# asking", so clients in the sandbox spoke (already working) could start
+# non-deterministically resolving the AI spoke's private endpoint IP
+# instead of their own, breaking working access. A zone scoped only to
+# the AI spoke's own VNet avoids that entirely: no shared record set, no
+# ambiguity.
+resource "azurerm_private_dns_zone" "acr_ai_spoke" {
+  count               = var.env == "dev" && var.create_dns_zones ? 1 : 0
+  name                = "privatelink.azurecr.io"
+  resource_group_name = var.ai_spoke_rg_name
+  tags                = var.tags
+}
+
+resource "azurerm_private_dns_zone_virtual_network_link" "acr_ai" {
+  count                 = var.env == "dev" && var.create_dns_zones ? 1 : 0
+  name                  = "link-acr-ai"
+  resource_group_name   = var.ai_spoke_rg_name
+  private_dns_zone_name = azurerm_private_dns_zone.acr_ai_spoke[0].name
+  virtual_network_id    = data.azurerm_virtual_network.ai[0].id
+  registration_enabled  = false
+}
+
+resource "azurerm_private_endpoint" "acr_ai_spoke" {
+  count               = var.env == "dev" && var.create_dns_zones ? 1 : 0
+  name                = "pe-acr-ai-cortex-${var.env}"
+  location            = var.location
+  resource_group_name = var.app_rg_name
+  subnet_id           = data.azurerm_subnet.ai_private_endpoints[0].id
+  tags                = var.tags
+
+  private_service_connection {
+    name                           = "psc-acr-ai-cortex-${var.env}"
+    private_connection_resource_id = local.acr_id
+    is_manual_connection           = false
+    subresource_names              = ["registry"]
+  }
+
+  private_dns_zone_group {
+    name                 = "default"
+    private_dns_zone_ids = [azurerm_private_dns_zone.acr_ai_spoke[0].id]
   }
 }
