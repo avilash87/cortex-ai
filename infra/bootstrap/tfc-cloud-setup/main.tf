@@ -81,7 +81,7 @@ resource "azuread_application_federated_identity_credential" "gh_pr" {
   description    = "GitHub Actions CI — runs on any PR to validate infra before merge"
   audiences      = ["api://AzureADTokenExchange"]
   issuer         = "https://token.actions.githubusercontent.com"
-  subject        = "repo:${var.github_owner}/${var.github_repo_name}:pull_request"
+  subject        = "repo:${var.github_owner}@${var.github_owner_id}/${local.repo_name}@${local.repo_id}:pull_request"
 }
 
 resource "azuread_application_federated_identity_credential" "gh_env" {
@@ -92,7 +92,7 @@ resource "azuread_application_federated_identity_credential" "gh_env" {
   audiences      = ["api://AzureADTokenExchange"]
   issuer         = "https://token.actions.githubusercontent.com"
   # environment: scoped to a named GitHub Environment — phase 5 creates dev + test environments
-  subject = "repo:${var.github_owner}/${var.github_repo_name}:environment:${each.key}"
+  subject = "repo:${var.github_owner}@${var.github_owner_id}/${local.repo_name}@${local.repo_id}:environment:${each.key}"
 }
 
 # Scoped to subscription so the management-group bootstrap (which runs second and creates
@@ -180,6 +180,35 @@ resource "github_repository" "cortex_ai" {
 
 locals {
   repo_name = var.create_github_repo ? github_repository.cortex_ai[0].name : data.github_repository.cortex_ai[0].name
+  repo_id   = var.create_github_repo ? github_repository.cortex_ai[0].repo_id : data.github_repository.cortex_ai[0].repo_id
+}
+
+# ============================================================================
+# GITHUB ENVIRONMENTS — Phase 5
+# Makes the gh_env federated credentials above actually usable: a workflow
+# job's `environment: dev` claim only gets a matching OIDC subject
+# (repo:owner/repo:environment:dev) once this environment exists as a real
+# repo setting, not just a string in the workflow YAML.
+# ============================================================================
+resource "github_repository_environment" "dev" {
+  repository  = local.repo_name
+  environment = "dev"
+  # No reviewers — matches auto_apply=true on the infra side: dev is the
+  # fast-feedback environment, deploys on merge with no manual gate.
+}
+
+resource "github_repository_environment" "test" {
+  repository  = local.repo_name
+  environment = "test"
+
+  # Same person approving their own deploy is a known limitation of a
+  # solo-developer POC — the mechanism (a required human approval step
+  # between merge and deploy) is what matters for the interview story, not
+  # who's on the other end of it. A real team would name a different
+  # reviewer here.
+  reviewers {
+    users = [15866712] # avilash87
+  }
 }
 
 # # Ruleset: only PR merges allowed on master; listed status checks must be green.
