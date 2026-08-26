@@ -1,0 +1,93 @@
+name: Services CD
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "services/**"
+      - "charts/**"
+      - ".github/workflows/services-cd.yml"
+
+permissions:
+  id-token: write # required for OIDC federation to Azure - no stored secret
+  contents: read
+
+jobs:
+  # Attached to the `dev` GitHub Environment (not just a build step) because
+  # that's the only federated credential this SPN has that matches a
+  # non-PR trigger - see gh_env in infra/bootstrap/tfc-cloud-setup/main.tf.
+  # There's no federated credential for a bare branch-push subject.
+  build-and-push:
+    name: Build + push to ACR
+    runs-on: ubuntu-latest
+    environment: dev
+    outputs:
+      image-tag-sha: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: 36306891-c853-4aa8-a7fc-0df4769cb4f5
+          tenant-id: defb61e5-4371-44ea-a638-4b01018530d5
+          subscription-id: 5e131d1f-220b-4c15-a3b0-4d0009629b75
+
+      - name: ACR login
+        run: az acr login --name acrcortexvx54b
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build + push (immutable sha tag + mutable dev tag)
+        uses: docker/build-push-action@v6
+        with:
+          context: services/console
+          push: true
+          tags: |
+            acrcortexvx54b.azurecr.io/cortex-console:${{ github.sha }}
+            acrcortexvx54b.azurecr.io/cortex-console:dev
+          platforms: linux/amd64
+
+  # Honest placeholder: AKS doesn't exist until Phase 6, so there is nothing
+  # to `helm upgrade --install` into yet. This job exists now to prove the
+  # dev Environment's OIDC trust actually works end-to-end (not just that
+  # the YAML parses) - it does not pretend to deploy anything.
+  deploy-dev:
+    name: Deploy to AKS dev (Phase 6 placeholder)
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - name: Azure login (OIDC) - proves the dev environment's federated credential works
+        uses: azure/login@v2
+        with:
+          client-id: 36306891-c853-4aa8-a7fc-0df4769cb4f5
+          tenant-id: defb61e5-4371-44ea-a638-4b01018530d5
+          subscription-id: 5e131d1f-220b-4c15-a3b0-4d0009629b75
+
+      - run: |
+          echo "Image acrcortexvx54b.azurecr.io/cortex-console:${{ github.sha }} is in ACR."
+          echo "AKS dev doesn't exist yet (Phase 6) - nothing to 'helm upgrade --install' into."
+          echo "This job's only real purpose right now is proving OIDC auth via the dev Environment succeeds."
+
+  # environment: test has a required-reviewer protection rule (this repo's
+  # only reviewer is the same person merging - a known limitation of a
+  # solo-developer POC, see infra/bootstrap/tfc-cloud-setup/main.tf). This
+  # job pausing for that approval is the real thing being demonstrated here,
+  # not the (still nonexistent) deployment itself.
+  deploy-test:
+    name: Deploy to AKS test (Phase 6 placeholder, gated by manual approval)
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    environment: test
+    steps:
+      - name: Azure login (OIDC) - proves the test environment's federated credential works
+        uses: azure/login@v2
+        with:
+          client-id: 36306891-c853-4aa8-a7fc-0df4769cb4f5
+          tenant-id: defb61e5-4371-44ea-a638-4b01018530d5
+          subscription-id: 5e131d1f-220b-4c15-a3b0-4d0009629b75
+
+      - run: |
+          echo "Reached deploy-test - the required manual approval on the test Environment was granted."
+          echo "AKS test doesn't exist yet (Phase 6) - nothing to deploy into."
