@@ -6,18 +6,22 @@ questions + our comprehension-check answers). Never edit a past phase's
 section — only add to it if we revisit that topic later.
 
 ## Contents
+*(Explicit anchor IDs, not auto-generated header slugs — GitHub and your
+editor's markdown preview slugify punctuation like em-dashes differently,
+so auto-slugs only work reliably in one renderer at a time. These `<a
+id="...">` tags right before each heading work in both.)*
 - [Phase 0 — Tooling, login, repo scaffold, remote TF state](#phase-0)
-  - [Phase 0 — Complete: What We Actually Built End-to-End](#phase-0-complete-what-we-actually-built-end-to-end)
+  - [Phase 0 — Complete: What We Actually Built End-to-End](#phase-0-complete)
 - [Phase 0b — Azure OIDC bootstrap for HCP Terraform](#phase-0b)
 - [Phase 0c — Management group](#phase-0c)
 - [Phase 0d — Bank-scale landing zone: full MG hierarchy + hub-and-spoke networking](#phase-0d)
-- [Phase 1 — Complete: Networking, Azure Policy, CI/CD pipeline](#phase-1-complete-networking-azure-policy-cicd-pipeline)
+- [Phase 1 — Complete: Networking, Azure Policy, CI/CD pipeline](#phase-1-complete)
 - [Phase 2 — IAM](#phase-2)
-  - [Phase 2 — Complete: IAM](#phase-2-complete-iam)
+  - [Phase 2 — Complete: IAM](#phase-2-complete)
 - [Phase 3 — VM, SSH key, Key Vault, ACR, Nexus, WireGuard](#phase-3)
-  - [Phase 3 — Complete: Platform Foundation](#phase-3-complete-platform-foundation)
-  - [Phase 3 — Addendum: what actually happened getting Bastion working](#phase-3-addendum-what-actually-happened-getting-bastion-working)
-- [Phase 4 — Complete: Networking Deep-Dive, Nexus, and the Console Skeleton](#phase-4-complete-networking-deep-dive-nexus-and-the-console-skeleton)
+  - [Phase 3 — Complete: Platform Foundation](#phase-3-complete)
+  - [Phase 3 — Addendum: what actually happened getting Bastion working](#phase-3-addendum)
+- [Phase 4 — Complete: Networking Deep-Dive, Nexus, and the Console Skeleton](#phase-4-complete)
 - Phase 5 — GitHub Actions CI/CD (not started)
 - Phase 6 — AKS + Helm + container policy (not started)
 - Phase 7 — Entra SSO + client-credentials flow (not started)
@@ -373,6 +377,7 @@ For the POC we run Nexus OSS via Docker Compose on the same VM in
 
 ---
 
+<a id="phase-0-complete"></a>
 ## Phase 0 — Complete: What We Actually Built End-to-End
 
 > This section covers everything that happened across Phase 0a–0d in
@@ -769,6 +774,7 @@ network start being used for real governance.
 
 ---
 
+<a id="phase-1-complete"></a>
 ## Phase 1 — Complete: Networking, Azure Policy, CI/CD pipeline
 
 ### What we built
@@ -1005,6 +1011,7 @@ explicitly.
 
 ---
 
+<a id="phase-2-complete"></a>
 ## Phase 2 — Complete: IAM
 
 ### What we built (27 resources applied)
@@ -1119,6 +1126,7 @@ All pipeline builds pull through Nexus, never directly from the internet. This i
 
 ---
 
+<a id="phase-3-complete"></a>
 ## Phase 3 — Complete: Platform Foundation
 
 ### What we built
@@ -1214,6 +1222,7 @@ Phase 4 (FastAPI application) starts once the VM is accessible via Bastion. Wire
 
 ---
 
+<a id="phase-3-addendum"></a>
 ## Phase 3 — Addendum: what actually happened getting Bastion working
 
 The plan above describes the intended path. In practice, closing out Phase 3 surfaced four separate real problems — each one is good interview material in its own right, arguably more valuable than the happy path, because they're all "how do you debug this in production" questions rather than "what is X."
@@ -1291,6 +1300,7 @@ Two wrinkles worth knowing about, both genuinely useful Terraform gotchas:
 
 ---
 
+<a id="phase-4-complete"></a>
 ## Phase 4 — Complete: Networking Deep-Dive, Nexus, and the Console Skeleton
 
 *Read this section the way you'd sit in on a senior engineer's design-review session: the goal isn't just "here's what we clicked," it's "here's the mental model that lets you debug this from first principles when it breaks in an interview whiteboard question or in production at 2am."*
