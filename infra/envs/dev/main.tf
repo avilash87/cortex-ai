@@ -42,6 +42,32 @@ module "keyvault" {
   create_dns_zones     = true
 }
 
+module "aks" {
+  source        = "../../modules/aks"
+  env           = "dev"
+  location      = "uksouth"
+  tags          = local.tags
+  rg_name       = "rg-cortex-ai-dev"
+  aks_subnet_id = module.network.ai_aks_subnet_id
+  acr_id        = module.keyvault.acr_id
+
+  api_server_authorized_ip_ranges = ["${module.keyvault.management_vm_public_ip}/32"]
+}
+
+# Federates the console's existing user-assigned identity (Phase 2) to a
+# Kubernetes ServiceAccount via AKS's OIDC issuer - the pod authenticates as
+# this identity with no secret mounted, same OIDC pattern as TFC/GH Actions.
+# namespace/service_account_name here must match what charts/console's
+# ServiceAccount manifest actually creates.
+resource "azurerm_federated_identity_credential" "console_workload_identity" {
+  name                = "console-workload-identity-dev"
+  resource_group_name = "rg-cortex-ai-dev"
+  parent_id           = module.iam.managed_identity_id
+  audience            = ["api://AzureADTokenExchange"]
+  issuer              = module.aks.oidc_issuer_url
+  subject             = "system:serviceaccount:dev:cortex-console"
+}
+
 # Overridable without a code change: uksouth capacity for popular B/D-series SKUs
 # fluctuates. If a plan fails with SkuNotAvailable, set this as a TFC workspace
 # variable to a different size (e.g. Standard_A2_v2, Standard_F2s_v2) and re-run.
