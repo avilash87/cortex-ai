@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+# sonar-project.properties' projectKey/organization values are public
+# SonarCloud identifiers, not secrets - they just happen to match the
+# generic-api-key heuristic's shape (key=value with an alphanumeric value).
+[allowlist]
+description = "SonarCloud project config - not a secret"
+paths = ['''services/console/sonar-project\.properties''']
