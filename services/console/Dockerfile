@@ -8,12 +8,17 @@
 ARG BASE_IMAGE=python:3.12-slim
 
 # ---- build stage: install deps into a user site-packages dir ----
+# hadolint can't resolve ARG values, so it can't see BASE_IMAGE's default is
+# actually pinned (python:3.12-slim) - that's a real limitation of static
+# analysis here, not something to silently accept unpinned in practice.
+# hadolint ignore=DL3006
 FROM ${BASE_IMAGE} AS build
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
 # ---- final stage: only the installed packages + app code, non-root ----
+# hadolint ignore=DL3006
 FROM ${BASE_IMAGE}
 RUN useradd --create-home --uid 1000 appuser
 WORKDIR /app
