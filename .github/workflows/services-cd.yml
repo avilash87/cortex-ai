@@ -63,46 +63,62 @@ jobs:
             acrcortexvx54b.azurecr.io/cortex-console:dev
           platforms: linux/amd64
 
-  # Honest placeholder: AKS doesn't exist until Phase 6, so there is nothing
-  # to `helm upgrade --install` into yet. This job exists now to prove the
-  # dev Environment's OIDC trust actually works end-to-end (not just that
-  # the YAML parses) - it does not pretend to deploy anything.
+  # Runs on the self-hosted runner for the same reason as build-and-push:
+  # the AKS API server's authorized_ip_ranges restriction means a
+  # GitHub-hosted runner has no network path to the cluster at all.
+  # Deploys the exact commit's sha-tagged image, not the mutable "dev" tag -
+  # avoids a race if another run's push overwrites "dev" between this job
+  # and build-and-push.
   deploy-dev:
-    name: Deploy to AKS dev (Phase 6 placeholder)
+    name: Deploy to AKS dev
     needs: build-and-push
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     environment: dev
     steps:
-      - name: Azure login (OIDC) - proves the dev environment's federated credential works
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - run: |
-          echo "Image acrcortexvx54b.azurecr.io/cortex-console:${{ github.sha }} is in ACR."
-          echo "AKS dev doesn't exist yet (Phase 6) - nothing to 'helm upgrade --install' into."
-          echo "This job's only real purpose right now is proving OIDC auth via the dev Environment succeeds."
+      - name: Get AKS credentials
+        run: az aks get-credentials -g rg-cortex-ai-dev -n aks-cortex-dev --admin --overwrite-existing
+
+      - name: helm upgrade --install
+        run: |
+          helm upgrade --install cortex-console charts/console \
+            --namespace dev --create-namespace \
+            --set image.tag=${{ github.sha }} \
+            --wait --timeout 2m
 
   # environment: test has a required-reviewer protection rule (this repo's
   # only reviewer is the same person merging - a known limitation of a
-  # solo-developer POC, see infra/bootstrap/tfc-cloud-setup/main.tf). This
-  # job pausing for that approval is the real thing being demonstrated here,
-  # not the (still nonexistent) deployment itself.
+  # solo-developer POC, see infra/bootstrap/tfc-cloud-setup/main.tf) - the
+  # job pausing here for that approval is real, not simulated.
   deploy-test:
-    name: Deploy to AKS test (Phase 6 placeholder, gated by manual approval)
+    name: Deploy to AKS test
     needs: deploy-dev
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     environment: test
     steps:
-      - name: Azure login (OIDC) - proves the test environment's federated credential works
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - run: |
-          echo "Reached deploy-test - the required manual approval on the test Environment was granted."
-          echo "AKS test doesn't exist yet (Phase 6) - nothing to deploy into."
+      - name: Get AKS credentials
+        run: az aks get-credentials -g rg-cortex-ai-dev -n aks-cortex-dev --admin --overwrite-existing
+
+      - name: helm upgrade --install
+        run: |
+          helm upgrade --install cortex-console charts/console \
+            --namespace test --create-namespace \
+            --set image.tag=${{ github.sha }} \
+            --wait --timeout 2m
