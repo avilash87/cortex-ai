@@ -1284,3 +1284,166 @@ Two wrinkles worth knowing about, both genuinely useful Terraform gotchas:
 
 **Q: Why can't you always reference a resource's computed attribute in the same `apply` that creates it?**
 > Usually you can — Terraform's dependency graph handles "create A, then create B using A's output" within one apply as standard practice. It breaks down specifically for Set-typed (as opposed to List-typed) nested blocks/attributes, because Terraform needs to compute a stable hash for every element of a set at plan time, and it can't hash a value that doesn't exist yet. The practical tell is a plan-time error like "argument is required" on a value you know you provided — check whether the target attribute is List or Set typed in the provider schema before assuming your code is wrong.
+
+---
+
+## Phase 4 — Complete: Networking Deep-Dive, Nexus, and the Console Skeleton
+
+*Read this section the way you'd sit in on a senior engineer's design-review session: the goal isn't just "here's what we clicked," it's "here's the mental model that lets you debug this from first principles when it breaks in an interview whiteboard question or in production at 2am."*
+
+### Concept: the whole network, end to end
+
+Everything built so far is a textbook **hub-spoke** topology — the single most common enterprise network pattern, and one of the most interview-tested concepts in any cloud/networking role. The idea: one central VNet (the **hub**) holds shared services everyone needs — connectivity (VPN/Firewall), DNS resolution, management tooling. Every other VNet (a **spoke**) holds one platform's actual workloads and *peers* to the hub rather than to each other. Spokes never talk directly to each other; if spoke-ai needs to reach spoke-sandbox, that traffic goes hub → spoke, enforced by the hub's firewall (once Phase 9 builds it). This is exactly the shape a bank's network team draws on a whiteboard in a "design a secure multi-team Azure network" interview question.
+
+```mermaid
+graph TB
+    subgraph HUB["🏢 HUB — vnet-hub-cortex-dev — 10.0.0.0/16 — rg-cortex-connectivity-dev"]
+        GW["GatewaySubnet<br/>10.0.0.0/24<br/>(reserved — Phase 9 VPN GW)"]
+        FW["AzureFirewallSubnet<br/>10.0.1.0/24<br/>(reserved — Phase 9)"]
+        DNSIN["snet-dns-resolver-inbound<br/>10.0.2.0/24<br/>➜ dnspr-hub-cortex-dev<br/>ep-inbound: 10.0.2.4"]
+        DNSOUT["snet-dns-resolver-outbound<br/>10.0.3.0/24<br/>(reserved, unused)"]
+        MGMT["snet-management-tools<br/>10.0.4.0/24<br/>(reserved — VM actually lives<br/>in sandbox spoke instead, see below)"]
+    end
+
+    subgraph AI["📦 SPOKE-AI — vnet-spoke-ai-cortex-dev — 10.1.0.0/16"]
+        AIAKS["snet-aks-nodes 10.1.0.0/24<br/>(Phase 6)"]
+        AIPE["snet-private-endpoints 10.1.1.0/24"]
+        AIAPIM["snet-apim 10.1.2.0/24<br/>(Phase 8)"]
+    end
+
+    subgraph DATA["📦 SPOKE-DATA — vnet-spoke-data-cortex-dev — 10.2.0.0/16"]
+        DATARES["reserved, not yet used"]
+    end
+
+    subgraph SANDBOX["📦 SPOKE-SANDBOX — vnet-spoke-sandbox-cortex-dev — 10.3.0.0/16"]
+        SBGEN["snet-general 10.3.0.0/24<br/>➜ vm-cortex-management-dev (10.3.0.4)<br/>WireGuard + Nexus containers"]
+        SBPE["snet-private-endpoints 10.3.1.0/24<br/>➜ pe-kv / pe-blob / pe-acr"]
+        SBBAST["AzureBastionSubnet 10.3.2.0/26<br/>➜ bastion-cortex-dev (Standard SKU)"]
+    end
+
+    HUB <-.peered, allow_forwarded_traffic=true.-> AI
+    HUB <-.peered.-> DATA
+    HUB <-.peered.-> SANDBOX
+
+    LAPTOP["💻 Your laptop<br/>WireGuard peer: 10.13.13.2/32<br/>AllowedIPs: 10.0.0.0/8"]
+    LAPTOP -.UDP 51820, tunnel.-> SBGEN
+```
+
+**The one deviation worth flagging explicitly** (plan.md's own standing rule: call out every place the build differs from the design): the hub reserves `snet-management-tools` for exactly this VM's workload, and TUTORIAL.md's Phase 3 write-up even said the VM "sits in snet-management-tools in the hub." It doesn't. Check `infra/modules/keyvault/main.tf` — the NIC's `subnet_id` points at `data.azurerm_subnet.sandbox_general`, i.e. the **sandbox spoke's** `snet-general`. The hub subnet exists, tagged, ready — and unused. This is exactly the kind of gap a design review catches: the docs described the intended architecture, the actual `terraform apply` did something slightly different, and nobody had reconciled the two until now. It also happens to explain today's whole DNS saga — more on that below.
+
+### Terraform → Azure Portal resource map
+
+Use this like a decoder ring: whenever you're staring at a `resource "azurerm_X" "Y"` block, this is where it actually lives once applied.
+
+| What it is | Terraform address | Azure Portal path |
+|---|---|---|
+| Hub VNet | `module.hub-network.azurerm_virtual_network.hub` *(bootstrap, local state)* | `rg-cortex-connectivity-dev` → **vnet-hub-cortex-dev** |
+| Spoke VNets (×3) | `azurerm_virtual_network.spoke["ai"\|"data"\|"sandbox"]` *(bootstrap)* | `rg-cortex-spoke-{ai,data,sandbox}-dev` → **vnet-spoke-\*-cortex-dev** |
+| Hub↔spoke peering | `azurerm_virtual_network_peering.hub_to_spoke` / `.spoke_to_hub` *(bootstrap)* | Any VNet blade → **Peerings** |
+| DNS Private Resolver | `azurerm_private_dns_resolver.hub` *(bootstrap)* | `rg-cortex-connectivity-dev` → **dnspr-hub-cortex-dev** |
+| Resolver inbound endpoint | `azurerm_private_dns_resolver_inbound_endpoint.hub` *(bootstrap)* | Resolver blade → **Inbound endpoints** → `ep-inbound` (10.0.2.4) |
+| AI-spoke route table | `module.network.azurerm_route_table.ai` | `rg-cortex-spoke-ai-dev` → **rt-ai-spoke-dev** (still blackholed — see open items below) |
+| Sandbox route table | `module.network.azurerm_route_table.sandbox` | `rg-cortex-spoke-sandbox-dev` → **rt-sandbox-spoke-dev** (fixed to `Internet` in Phase 4) |
+| Sandbox NSG | `module.network.azurerm_network_security_group.sandbox` | `rg-cortex-spoke-sandbox-dev` → **nsg-sandbox-dev** → **Inbound security rules** |
+| Private DNS zones (×3) | `module.keyvault.azurerm_private_dns_zone.{key_vault,blob,acr}` | `rg-cortex-management-dev` → **privatelink.vaultcore.azure.net** etc. |
+| Zone↔VNet links (×6 after Phase 4) | `module.keyvault.azurerm_private_dns_zone_virtual_network_link.*` | Each zone blade → **Virtual network links** |
+| Management VM | `module.keyvault.azurerm_linux_virtual_machine.management` | `rg-cortex-management-dev` → **vm-cortex-management-dev** |
+| VM's managed identity | `module.keyvault.azurerm_linux_virtual_machine.management.identity` | VM blade → **Identity** → System assigned: On |
+| Bastion | `module.keyvault.azurerm_bastion_host.management` | `rg-cortex-management-dev` → **bastion-cortex-dev** (Standard SKU) |
+| Private endpoints (×3) | `module.keyvault.azurerm_private_endpoint.{key_vault,storage_blob,acr}` | `rg-cortex-ai-dev` → each resource's **Networking** blade → Private endpoint connections |
+| Key Vault access policies | `module.keyvault.azurerm_key_vault.this.access_policy` | `rg-cortex-ai-dev` → **kv-cortex-dev-vx54b** → **Access policies** |
+| WireGuard / Nexus | *not Terraform-managed* — `ops/management-vm/docker-compose.*.yml` | Not in Portal at all — `docker ps` on the VM is the only view |
+
+### The DNS resolution flow — the actual bug, walked through properly
+
+This is worth understanding as a *general pattern*, not just today's fix, because "why doesn't my private endpoint resolve from outside the VNet" is one of the most common real Azure networking support tickets that exists.
+
+**The rule that matters:** an Azure Private DNS Zone only answers queries for **clients sitting in a VNet that zone is linked to** (for a normal VM in that VNet) — **or**, for anything outside Azure entirely (a VPN client, an on-prem server), for queries that arrive **through a DNS Private Resolver whose own VNet has that same link**. A private DNS zone doesn't "belong" to a resolver or a VM by default — it belongs to whichever VNets you've explicitly linked it to, full stop.
+
+```mermaid
+sequenceDiagram
+    participant L as 💻 Laptop (WireGuard client)
+    participant R as 🧭 dnspr-hub-cortex-dev<br/>(lives in HUB vnet)
+    participant Z as 📋 privatelink.vaultcore.azure.net<br/>(the zone)
+    participant PE as 🔒 Private Endpoint<br/>10.3.1.6 (sandbox spoke)
+    participant PUB as 🌐 Public DNS<br/>(akadns.net / Traffic Manager)
+
+    Note over L,PUB: BEFORE the fix (zone linked to sandbox spoke only)
+    L->>R: nslookup kv-...vault.azure.net (via tunnel, DNS=10.0.2.4)
+    R->>Z: Do I have this zone linked to MY vnet (hub)?
+    Z-->>R: No link to hub — resolver can't see this zone
+    R->>PUB: Fall back to normal recursive resolution
+    PUB-->>L: Public IP (51.105.x.x) — WRONG, not private
+
+    Note over L,PUB: AFTER the fix (zone also linked to hub)
+    L->>R: nslookup kv-...vault.azure.net (via tunnel, DNS=10.0.2.4)
+    R->>Z: Do I have this zone linked to MY vnet (hub)?
+    Z-->>R: Yes — hub is linked
+    R->>PE: Resolve via the zone's A record
+    PE-->>R: 10.3.1.6
+    R-->>L: 10.3.1.6 — correct, private, routed back through the tunnel
+```
+
+The fix (`fix(phase4): link private DNS zones to hub VNet` — PR #17) added exactly three resources: `link-kv-hub`, `link-blob-hub`, `link-acr-hub`, each linking an existing zone to the hub VNet the resolver already lives in. Nothing about the resolver itself, the WireGuard tunnel, or the private endpoints needed to change — the zone was simply invisible to the one component doing the asking.
+
+**Diagnostic technique worth remembering:** querying the resolver directly (`nslookup <name> 10.0.2.4`, bypassing whatever DNS server your OS would normally pick) isolates "is the resolver even configured to know this zone" from "is my client's own DNS routing broken." We used exactly that technique earlier to prove the WSL2/Windows DNS-racing theory was a red herring — the resolver itself was returning the wrong answer, which no client-side fix could have solved.
+
+### The WireGuard connectivity flow, end to end
+
+```mermaid
+sequenceDiagram
+    participant App as az/pip/curl on laptop
+    participant WG as WireGuard client<br/>(Windows native, mirrored into WSL2)
+    participant VMWG as WireGuard container<br/>on vm-cortex-management-dev
+    participant NSG as nsg-sandbox-dev
+    participant Resolver as dnspr-hub-cortex-dev
+    participant PE as Private Endpoint (10.3.x.x)
+
+    App->>WG: DNS query / HTTPS request to kv-...vault.azure.net
+    WG->>NSG: UDP 51820 handshake to VM public IP
+    NSG-->>WG: Allowed (AllowWireGuard rule, priority 110)
+    WG->>VMWG: Encrypted tunnel established (10.13.13.2 ⇄ VM)
+    App->>Resolver: DNS query routed through tunnel (AllowedIPs 10.0.0.0/8 covers 10.0.2.4)
+    Resolver-->>App: 10.3.x.x (private IP, once zone is hub-linked)
+    App->>PE: HTTPS to 10.3.x.x — routed through tunnel again (same 10.0.0.0/8 range)
+    PE-->>App: Response (subject to the resource's own RBAC/access policy)
+```
+
+Two things worth internalizing here for an interview: first, **the tunnel carries everything** — DNS queries and the actual data-plane HTTPS traffic both ride the same WireGuard tunnel, because `AllowedIPs = 10.0.0.0/8` covers both the resolver's IP and the private endpoints' IPs. Second, **NSGs only ever see the outer tunnel packet** — the UDP 51820 handshake — never the decrypted traffic inside it. That's why no NSG change was ever needed to reach Nexus's port 8082 from the laptop: from the NSG's point of view, that traffic doesn't "arrive" at the VM a second time, it's already inside an established, permitted tunnel.
+
+**Open item, honestly flagged:** the AI spoke's route table (`rt-ai-spoke-dev`) still points `0.0.0.0/0` at the same nonexistent `10.0.1.4` placeholder that blackholed the sandbox spoke's egress. Nothing there needs internet access *yet* (AKS doesn't exist until Phase 6), but the same bootstrapping paradox from Phase 3 is sitting there dormant, waiting to bite whoever builds AKS next without noticing.
+
+### Docker concepts, consolidated
+
+- **Multi-stage build**: a `build` stage installs dependencies (needs `pip`, a compiler toolchain in some cases, etc.); the final stage `COPY --from=build` only the *installed packages*, never the tools used to install them. Shrinks the image and removes anything an attacker could use to build new tools inside a compromised container.
+- **Non-root (`USER 1000:1000`)**: a container-breakout exploit doesn't inherit root inside the container. Use the **numeric** UID, not a username — `hadolint`'s `DL3066` flags this because some container runtimes and Kubernetes admission controllers (Phase 6's Gatekeeper `runAsNonRoot` policy) can't reliably resolve a username to confirm non-root without parsing `/etc/passwd` inside the image first.
+- **`.dockerignore`**: keeps `__pycache__`, `.git`, and virtualenvs out of the build context — smaller context, faster builds, no chance of accidentally `COPY`-ing secrets or local state into a layer.
+- **The chokepoint pattern (Nexus)**: a proxy repository sits between the daemon and the real upstream. The client (`docker`, `pip`) is pointed at Nexus's URL instead of the real registry; Nexus fetches-and-caches on a miss, serves from cache on a hit. This is what makes "block a compromised base image everywhere at once" possible — you update one proxy's blocklist instead of every CI runner and dev machine individually.
+- **Why the `BASE_IMAGE` build arg exists**: a Dockerfile that builds correctly on the management VM (which has a route to Nexus) but is committed to a public GitHub repo also has to build in GitHub Actions (Phase 5), which is an ephemeral runner with *no* network path into this VNet at all. Hardcoding Nexus's private IP into `FROM` would make the Dockerfile un-buildable outside this one VM. The `ARG BASE_IMAGE=python:3.12-slim` default keeps it portable; `--build-arg BASE_IMAGE=10.3.0.4:8082/library/python:3.12-slim` opts into the chokepoint when you're actually inside the VNet. **This is a real, currently-unsolved gap for CI** — Phase 5 will need either a self-hosted GitHub Actions runner living inside the VNet, or Nexus exposed with proper auth outside it. Flagged, not fixed.
+
+### Nexus, walked through
+
+```mermaid
+flowchart LR
+    subgraph VM["vm-cortex-management-dev"]
+        D[docker pull<br/>10.3.0.4:8082/hello-world] --> N[Nexus container<br/>docker-proxy repo]
+        P[pip install<br/>--index-url .../pypi-proxy/simple/] --> N2[Nexus container<br/>pypi-proxy repo]
+    end
+    N -->|cache miss| DH[(Docker Hub<br/>registry-1.docker.io)]
+    N2 -->|cache miss| PY[(pypi.org)]
+    N -->|cached, checksummed| D
+    N2 -->|cached| P
+```
+
+Two real gotchas hit and fixed today, both worth knowing cold:
+
+1. **Docker needs a dedicated port, PyPI doesn't.** Docker's registry protocol (`GET /v2/...`) can't be served as a URL path the way a plain HTTP index can — Nexus needs a separate bound port (`8082`) per Docker repo/group. PyPI, npm, and most other formats are just paths under Nexus's one main port (`8081`).
+2. **Disabling anonymous access means *everything* needs auth, including reads of public cached content** — and Docker's auth flow specifically needs the **Docker Bearer Token Realm** actively enabled (`Security → Realms`, or via `PUT /service/rest/v1/security/realms/active`), which is *not* on by default even once anonymous access is off and even after dragging it into the UI's Active column, if the save didn't actually persist. A `403 Forbidden` on `docker login` with **no** `WWW-Authenticate` challenge (rather than the normal 401-then-challenge dance) is the tell that the realm itself isn't active — verify it via the REST API directly (`GET .../realms/active`) rather than trusting the UI state.
+
+### Comprehension check — asked and answered
+
+**Q1: Your WireGuard client is on your laptop; the private DNS zones are linked to two VNets now (sandbox and hub). Why did the hub link matter specifically for this client, when the VM itself could already resolve those names fine without it?**
+> Because the VM sits *inside* the sandbox spoke — it's covered by the zone's existing sandbox-spoke link, so it never needed the hub link at all. The laptop's WireGuard client, though, isn't "in" any VNet; it's an external peer whose DNS queries get routed to the resolver living in the **hub**. A resolver only has visibility into zones linked to *its own* VNet — so from the resolver's point of view, a zone linked only to sandbox simply doesn't exist. Two different clients (VM vs. laptop) hit two completely different resolution paths, and only one of them was ever broken.
+
+**Q2: The Dockerfile's `BASE_IMAGE` build arg defaults to the public `python:3.12-slim` path rather than Nexus's proxy. Why does that particular design choice exist, and what would you need to add later (Phase 5) to actually close that gap for CI?**
+> Because GitHub Actions runners are ephemeral cloud VMs entirely outside this VNet — they have no WireGuard tunnel, no peering, no route to `10.3.0.4` at all, so hardcoding Nexus's address into `FROM` would make the image un-buildable in CI. Closing the gap for real needs one of: a self-hosted GitHub Actions runner deployed *inside* the VNet (so it has the same network path the VM does), or exposing Nexus through a public-but-authenticated endpoint (e.g. behind Application Gateway/APIM with real auth) so CI can reach it without being on the private network. Neither is built yet — it's an honestly-flagged gap, not a solved problem.
