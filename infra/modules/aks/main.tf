@@ -18,9 +18,10 @@ resource "azurerm_kubernetes_cluster" "this" {
 
   sku_tier = "Free"
 
-  oidc_issuer_enabled       = true
-  workload_identity_enabled = true
-  azure_policy_enabled      = true
+  oidc_issuer_enabled               = true
+  workload_identity_enabled         = true
+  azure_policy_enabled              = true
+  role_based_access_control_enabled = true
 
   default_node_pool {
     name           = "system"
@@ -31,6 +32,13 @@ resource "azurerm_kubernetes_cluster" "this" {
 
   network_profile {
     network_plugin = "azure"
+    network_policy = "azure" # pod-to-pod traffic restrictable via NetworkPolicy objects
+  }
+
+  # Public API endpoint restricted to the management VM's static IP - see
+  # the variable's own comment for why that address specifically.
+  api_server_access_profile {
+    authorized_ip_ranges = var.api_server_authorized_ip_ranges
   }
 
   # Cluster's own control-plane identity (distinct from the kubelet identity

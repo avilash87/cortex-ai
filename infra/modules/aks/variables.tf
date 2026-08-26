@@ -36,3 +36,12 @@ variable "acr_id" {
   description = "ACR resource ID - grants the kubelet identity AcrPull so nodes can pull cortex-console"
   type        = string
 }
+
+# Restricting to the management VM's static public IP rather than the dynamic
+# home-broadband IP problem WireGuard already has: the self-hosted runner and
+# any interactive kubectl/helm work both happen from that VM (via Bastion),
+# so it's the one address that's actually stable and actually needs API access.
+variable "api_server_authorized_ip_ranges" {
+  description = "CIDRs allowed to reach the API server's public endpoint"
+  type        = list(string)
+}

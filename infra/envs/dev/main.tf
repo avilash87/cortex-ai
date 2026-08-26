@@ -50,6 +50,8 @@ module "aks" {
   rg_name       = "rg-cortex-ai-dev"
   aks_subnet_id = module.network.ai_aks_subnet_id
   acr_id        = module.keyvault.acr_id
+
+  api_server_authorized_ip_ranges = ["${module.keyvault.management_vm_public_ip}/32"]
 }
 
 # Federates the console's existing user-assigned identity (Phase 2) to a
