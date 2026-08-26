@@ -13,10 +13,17 @@ denied_public_types := {
 	"azurerm_container_registry",
 }
 
-deny contains msg if {
+# Pinned to conftest v0.51.0 (matches infra-pr.yml's wget'd version exactly —
+# verified against that exact binary, not just whatever `:latest` resolves to
+# locally, since its HCL parser's output shape is version-specific: this
+# version returns each resource block as a bare object at
+# input.resource[type][name], not wrapped in an array the way some other
+# conftest versions do. Re-verify this shape if that pinned version ever
+# changes.
+deny[msg] {
 	some resource_type, name
 	denied_public_types[resource_type]
-	block := input.resource[resource_type][name][_] # Conftest wraps each resource block in an array
+	block := input.resource[resource_type][name]
 	block.public_network_access_enabled == true
 	msg := sprintf("%s.%s explicitly sets public_network_access_enabled = true", [resource_type, name])
 }
@@ -29,10 +36,10 @@ deny contains msg if {
 # that ambiguity doesn't false-positive in practice. If that ever changes,
 # failing closed (forcing a human to look) is the right direction for a
 # security control to be wrong in, not failing open.
-deny contains msg if {
+deny[msg] {
 	some resource_type, name
 	denied_public_types[resource_type]
-	block := input.resource[resource_type][name][_]
+	block := input.resource[resource_type][name]
 	# `not block.x` is true for BOTH "x is absent" and "x is false" in Rego —
 	# false is the compliant value here, so a plain `not` would wrongly flag
 	# correctly-configured resources too. object.get with a sentinel default
