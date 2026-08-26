@@ -26,7 +26,15 @@ jobs:
   # There's no federated credential for a bare branch-push subject.
   build-and-push:
     name: Build + push to ACR
-    runs-on: ubuntu-latest
+    # ACR's public network access is disabled (matches the private-endpoints
+    # posture everywhere else in this project) - a GitHub-hosted runner has
+    # no network path to it at all, confirmed via a real failed run
+    # ("CONNECTIVITY_REFRESH_TOKEN_ERROR" - Azure's misleading wording for
+    # "can't reach it", not an auth/RBAC problem). This runner lives on
+    # vm-cortex-management-dev, inside the same VNet as the ACR's private
+    # endpoint, alongside Nexus. Repo is public - see docs/TUTORIAL.md for
+    # the accepted-risk tradeoff that decision carries.
+    runs-on: self-hosted
     environment: dev
     outputs:
       image-tag-sha: ${{ github.sha }}
