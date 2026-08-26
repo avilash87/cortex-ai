@@ -209,6 +209,15 @@ resource "github_repository_environment" "test" {
   reviewers {
     users = [15866712] # avilash87
   }
+
+  # Left unset, GitHub defaults this to true — meaning any repo admin
+  # skips the required-reviewer wait entirely, discovered when a real
+  # deploy-test run sailed through with zero pause (confirmed via the
+  # deployment's status history: a genuine "waiting" state, resolved to
+  # "queued" 9 seconds later — nobody clicked Approve that fast, it was
+  # bypassed). Explicitly false so the gate actually gates, even for the
+  # repo's own admin/owner.
+  can_admins_bypass = false
 }
 
 # Ruleset: only PR merges allowed on master; no direct pushes/force-pushes.
