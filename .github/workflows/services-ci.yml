@@ -1,0 +1,120 @@
+name: Services CI
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - "services/**"
+      - "charts/**"
+      - ".github/workflows/services-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint (ruff + hadolint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: ruff
+        run: |
+          pip install ruff
+          ruff check services/console/
+
+      - name: hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: services/console/Dockerfile
+
+  test:
+    name: Test (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: |
+          pip install -r services/console/requirements.txt
+          pip install pytest httpx
+
+      # No test files exist yet - Phase 4 shipped a 2-endpoint skeleton, not
+      # features worth testing. This job exists now so the job itself, the
+      # required-check wiring, and pytest's exit-code-5-on-no-tests-collected
+      # behavior are all proven before there's real logic riding on it.
+      - name: pytest
+        run: pytest services/console/ -v
+
+  build:
+    name: Build image (no push - PR check only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: services/console
+          push: false
+          tags: cortex-console:pr-${{ github.event.pull_request.number }}
+          platforms: linux/amd64
+
+  scan-secrets:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # gitleaks scans full history, not just the diff
+
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  scan-sca-iac:
+    name: Trivy (Python deps + Dockerfile misconfig)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy filesystem scan (Python deps - SCA)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: services/console
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+      - name: Trivy config scan (Dockerfile misconfig - IaC)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: config
+          scan-ref: services/console
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+  sast:
+    name: SonarCloud
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # SonarCloud wants full history for blame/new-code analysis
+
+      # Requires a SONAR_TOKEN repo secret from sonarcloud.io (free tier) -
+      # not set up yet. This job will fail until that's added; see
+      # services/console/sonar-project.properties for the project/org keys
+      # to use when creating the SonarCloud project.
+      - uses: SonarSource/sonarqube-scan-action@v4
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
