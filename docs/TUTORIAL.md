@@ -22,7 +22,7 @@ id="...">` tags right before each heading work in both.)*
   - [Phase 3 — Complete: Platform Foundation](#phase-3-complete)
   - [Phase 3 — Addendum: what actually happened getting Bastion working](#phase-3-addendum)
 - [Phase 4 — Complete: Networking Deep-Dive, Nexus, and the Console Skeleton](#phase-4-complete)
-- Phase 5 — GitHub Actions CI/CD (not started)
+- [Phase 5 — Complete: CI/CD Pipelines](#phase-5-complete)
 - Phase 6 — AKS + Helm + container policy (not started)
 - Phase 7 — Entra SSO + client-credentials flow (not started)
 - Phase 8 — Foundry + Guardrails + APIM (not started)
@@ -1461,3 +1461,91 @@ Two real gotchas hit and fixed today, both worth knowing cold:
 
 **Q2: The Dockerfile's `BASE_IMAGE` build arg defaults to the public `python:3.12-slim` path rather than Nexus's proxy. Why does that particular design choice exist, and what would you need to add later (Phase 5) to actually close that gap for CI?**
 > Because GitHub Actions runners are ephemeral cloud VMs entirely outside this VNet — they have no WireGuard tunnel, no peering, no route to `10.3.0.4` at all, so hardcoding Nexus's address into `FROM` would make the image un-buildable in CI. Closing the gap for real needs one of: a self-hosted GitHub Actions runner deployed *inside* the VNet (so it has the same network path the VM does), or exposing Nexus through a public-but-authenticated endpoint (e.g. behind Application Gateway/APIM with real auth) so CI can reach it without being on the private network. Neither is built yet — it's an honestly-flagged gap, not a solved problem.
+
+---
+
+<a id="phase-5-complete"></a>
+## Phase 5 — Complete: CI/CD Pipelines
+
+*Corporate-trainer framing again: this phase produced more genuinely-fixed bugs per hour than any other so far — nine separate, real issues, each with a root cause worth remembering, not a rehearsed happy path. Read the table first for the shape of it, then the narrative for the mechanism behind each one.*
+
+### Concept
+
+Two pipelines, deliberately never crossed: **Terraform Cloud** owns `infra/**` (speculative plan on PR, full plan + apply on merge — already built in Phase 1, just gained its first real OPA policy this phase); **GitHub Actions** owns `services/**` and `charts/**`, split into **CI** (lint/test/build/scan, runs on every PR, blocks merge on failure) and **CD** (build+push+deploy, runs on merge to master). Both authenticate to Azure via **OIDC federation** — GitHub's own token service issues a short-lived token per workflow run, Azure trusts it via a federated identity credential scoped to a specific *subject* claim (which PR, which branch, which named Environment) — no client secret stored anywhere, ever.
+
+### What we built
+
+| Pipeline | File | Trigger | What it does |
+|---|---|---|---|
+| Infra PR checks | `.github/workflows/infra-pr.yml` | PR touching `infra/**`, `policy/opa/**` | fmt, validate (dev+test), Trivy IaC, **OPA/Conftest (first real policy this phase)**, TFC speculative plan |
+| App CI | `.github/workflows/services-ci.yml` | PR touching `services/**`, `charts/**` | ruff+hadolint, pytest, docker build (no push), Trivy fs+config, gitleaks, SonarCloud |
+| App CD | `.github/workflows/services-cd.yml` | push to master, `services/**`/`charts/**` | build+push to ACR (self-hosted runner), deploy-dev placeholder, deploy-test placeholder (gated by manual approval) |
+| GitHub Environments | `infra/bootstrap/tfc-cloud-setup/main.tf` | — | `dev` (no gate) and `test` (required reviewer) — make the `environment:` OIDC subject claims real |
+| Self-hosted runner | systemd service on `vm-cortex-management-dev` | — | Only path that can reach the private ACR/Nexus from CI |
+
+### The nine bugs, and the pattern behind each
+
+Every single one of these looked correct when written and failed the moment it touched something real. That's not a coincidence — it's what "test locally, then verify against the exact thing CI actually runs" is *for*.
+
+1. **Conftest's Rego version is pinned, and it's old.** `infra-pr.yml` `wget`s `conftest v0.51.0` specifically — its bundled OPA predates the `if`/`contains` v1 syntax entirely. Testing locally against `openpolicyagent/conftest:latest` (a newer version) passed clean; the real pinned binary rejected it outright with `var cannot be used for rule name`. **Lesson: download the exact pinned binary and test against that, not whatever `:latest` resolves to.**
+
+2. **Conftest's parsed JSON shape is *also* version-specific.** The newer image wraps each resource block in an array (`input.resource.type.name[0]`); v0.51.0 returns a bare object (`input.resource.type.name`). Same symptom both times — a rule that silently never fires, "passes" that are actually vacuous. Caught by writing a debug rule that printed the raw value, not by trusting a clean conftest run.
+
+3. **Rego's `not` doesn't mean what it looks like it means.** `not block.x` is true when `x` is undefined **or** when `x` is `false` — meaning a naive "flag if this safety setting is missing" rule also flags the case where it's correctly set to `false`. The fix is `object.get(block, "x", "sentinel") == "sentinel"`, which is the only way to actually distinguish "absent" from "present and false."
+
+4. **`ruff`'s import-sort depends on where you run it from.** `ruff check .` from inside `services/console/` passed; the workflow's `ruff check services/console/` from the repo root failed on the exact same file, because ruff's first-party-import detection is relative to the invocation directory. Same binary, same version, different result — invocation context matters as much as the tool itself.
+
+5. **`pytest` fails on zero tests collected.** A required CI check that permanently fails until real features exist blocks every future PR indefinitely. The fix wasn't a flag to suppress the exit code — it was writing two real, small tests for the endpoints that already existed.
+
+6. **`hadolint`'s handling of `ARG`-based `FROM` is also version-specific.** Local hadolint (2.15.1) didn't flag `FROM ${BASE_IMAGE}`; the Action's pinned version flagged it as unpinned (`DL3006`), unable to see the ARG's default is in fact pinned. Suppressed with an inline `# hadolint ignore=DL3006` and a comment explaining *why* it's safe to ignore, rather than chasing version parity with a tool whose whole point is running in CI, not matching a local install.
+
+7. **`gitleaks` doesn't know your config values aren't secrets.** `sonar.projectKey=avilash87_cortex-ai` matches the generic-api-key heuristic purely by *shape* (key=value, alphanumeric). Gitleaks' inline `gitleaks:allow` marker needs to sit on the *same line* as the finding — impossible in a `.properties` file, where a trailing `#` becomes part of the value, not a comment. A repo-level `.gitleaks.toml` path allowlist was the actual fix; also learned the allowlist schema itself is version-specific (`[[allowlist]]` array vs `[allowlist]` singular table — another "test against the exact tool version" lesson).
+
+8. **The SonarCloud scanner looks for its config file at the checkout root, not wherever the code lives.** `services/console/sonar-project.properties` produced "mandatory properties" errors even with the file present and correctly formatted — it was simply never being read. Moved to the repo root; paths inside it updated to be root-relative.
+
+9. **GitHub's OIDC subject claim changed shape, and the two-part diagnosis that followed.** The federated credential's `subject` was written as `repo:owner/repo:environment:dev` — the format GitHub used to issue. The actual token now presents `repo:owner@15866712/repo@1338834164:environment:dev`, appending immutable numeric owner/repo IDs specifically to stop a renamed account or repository from inheriting a stale federated credential's trust. Fixed by confirming the real claim via `gh api repos/.../cortex-ai` rather than guessing, and rebuilding the subject with both IDs. **Getting past this only revealed the next, unrelated problem**: `az acr login` then failed with a 403 that *looked* like the same class of auth issue but wasn't — `AcrPush` RBAC was missing (Contributor doesn't include ACR's data-plane push action when `admin_enabled = false`). Fixing that still didn't work, because the *real* blocker was one layer further down: **ACR's public network access is disabled**, so no GitHub-hosted runner can reach it at all, regardless of identity or role — Azure's error wording ("CONNECTIVITY_REFRESH_TOKEN_ERROR") is misleadingly framed as an auth failure when it's actually "can't connect." Three genuinely different failure layers (OIDC subject, RBAC, network reachability) that all initially presented as "access denied."
+
+### The pipeline, end to end
+
+```mermaid
+flowchart TB
+    PR[Pull Request] -->|infra/**| TFCPR[infra-pr.yml:<br/>fmt, validate, Trivy,<br/>OPA/Conftest, TFC speculative plan]
+    PR -->|services/**, charts/**| APPCI[services-ci.yml:<br/>ruff+hadolint, pytest, docker build,<br/>Trivy, gitleaks, SonarCloud]
+
+    MERGE[Merge to master] -->|infra/**| TFCAPPLY[TFC full plan -><br/>auto-apply for dev,<br/>manual Confirm&Apply for test]
+    MERGE -->|services/**, charts/**| APPCD[services-cd.yml]
+
+    subgraph APPCD [" "]
+        BUILD["build-and-push<br/>(self-hosted runner on<br/>vm-cortex-management-dev)"]
+        DDEV["deploy-dev<br/>(OIDC via dev Environment,<br/>Phase 6 placeholder)"]
+        GATE{{"test Environment<br/>required-reviewer gate"}}
+        DTEST["deploy-test<br/>(OIDC via test Environment,<br/>Phase 6 placeholder)"]
+        BUILD --> DDEV --> GATE --> DTEST
+    end
+
+    BUILD -.->|"private endpoint only -<br/>needs VNet access"| ACR[(ACR<br/>acrcortexvx54b)]
+    BUILD -.->|could also route through| NEXUS[(Nexus<br/>10.3.0.4:8082)]
+```
+
+### The self-hosted runner tradeoff, stated plainly
+
+This repo is **public**. A self-hosted runner on a public repo is a real, not theoretical, attack surface: anyone can open a PR, and a self-hosted runner means that PR's workflow code can execute on real infrastructure — potentially reading the runner's own credentials, or pivoting into whatever network it sits on. GitHub's default mitigation (a maintainer must click "Approve and run" for a first-time or fork contributor's workflow before it executes) reduces but does not eliminate this. The alternative that removes the risk entirely — making the repo private — was considered and deliberately deferred, not overlooked; it's a real open decision, not a solved one.
+
+### Interview tips
+
+**Q: Why does a policy-as-code tool passing locally not guarantee it'll pass in CI?**
+> Because "locally" almost always means a different binary version than the one CI actually pins — and for a tool like Conftest/OPA, both the accepted syntax (legacy `deny[msg]` vs v1 `deny contains msg if`) and the shape of its parsed output can differ between versions. The fix isn't "trust the local run" — it's downloading the *exact* pinned version CI uses and testing against that specifically.
+
+**Q: What's the actual difference between an authentication failure, an authorization failure, and a network-reachability failure — and why does it matter that Azure's error messages don't always distinguish them clearly?**
+> Authentication answers "who are you" (OIDC/token issues), authorization answers "are you allowed to do this" (RBAC/role assignments), and reachability answers "can you even get there" (network/firewall/private-endpoint rules) — three completely independent layers, each requiring a different fix. Azure's ACR login error text conflated all three into what read like a single auth problem, and the actual root cause (public network access disabled) was the last one checked, not the first — costing real debugging time. The practical habit: when an "access denied"-shaped error doesn't resolve after fixing the obvious permission, deliberately check the layer below it rather than re-trying the same fix harder.
+
+**Q: Why put a required-reviewer gate on a GitHub Environment that doesn't deploy anything yet?**
+> To prove the trust mechanism works before there's anything real riding on it. If the OIDC federated credential, the Environment protection rule, or the approval flow were broken, discovering that during Phase 6 (with a real AKS cluster on the line) would be a worse time than discovering it now, against a placeholder that just echoes a message.
+
+### Comprehension check — asked and answered
+
+**Q1: Given `gh_pr`'s federated credential was broken (missing the numeric IDs) since Phase 2, why did `infra-pr.yml` keep passing every PR check throughout this whole session?**
+> Because `infra-pr.yml` never actually uses OIDC/`azure/login` — its jobs (fmt, validate, Trivy, Conftest) only need a checked-out repo, not an authenticated Azure session, and TFC's own speculative-plan check authenticates using *its own* federated credential (a completely separate app registration and subject format), not `gh_actions`'s. The broken credential sat unused and unnoticed until `services-cd.yml` became the first workflow to actually call `azure/login`.
+
+**Q2: The ACR fix took three attempts — subject format, then RBAC, then network access — each looking like it should have been the last one. What's the general lesson for debugging a stack of independent failure layers like this?**
+> Fix one layer, then re-test against the *original* symptom, not your assumption about what's now working. Each fix in this chain was independently correct and independently necessary, but none of them was sufficient alone — a "should be fixed now" instinct after the first or second fix would have stopped short of the actual, deeper blocker. The tell that there's another layer underneath is the exact same class of error message persisting after a fix that should have addressed it.
