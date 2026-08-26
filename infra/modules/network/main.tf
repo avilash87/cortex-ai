@@ -155,11 +155,16 @@ resource "azurerm_route_table" "ai" {
   bgp_route_propagation_enabled = false # prevent on-prem routes leaking into spoke
   tags                          = var.tags
 
+  # TEMPORARY (Phase 6 -> Phase 9): same bootstrap paradox as the sandbox
+  # spoke in Phase 3/4 - AKS nodes need real egress to register with the
+  # control plane and pull system images (mcr.microsoft.com etc.), but the
+  # Phase 9 firewall this route is meant to point at doesn't exist yet.
+  # Revert to VirtualAppliance / var.hub_firewall_private_ip once Phase 9
+  # stands up the real Azure Firewall.
   route {
-    name                   = "default-via-firewall"
-    address_prefix         = "0.0.0.0/0"
-    next_hop_type          = "VirtualAppliance"
-    next_hop_in_ip_address = var.hub_firewall_private_ip
+    name           = "default-via-firewall"
+    address_prefix = "0.0.0.0/0"
+    next_hop_type  = "Internet"
   }
 }
 
