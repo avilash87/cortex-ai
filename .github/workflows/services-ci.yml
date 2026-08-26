@@ -115,6 +115,6 @@ jobs:
       # not set up yet. This job will fail until that's added; see
       # services/console/sonar-project.properties for the project/org keys
       # to use when creating the SonarCloud project.
-      - uses: SonarSource/sonarqube-scan-action@v4
+      - uses: SonarSource/sonarqube-scan-action@v6
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
