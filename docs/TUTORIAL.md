@@ -23,7 +23,7 @@ id="...">` tags right before each heading work in both.)*
   - [Phase 3 — Addendum: what actually happened getting Bastion working](#phase-3-addendum)
 - [Phase 4 — Complete: Networking Deep-Dive, Nexus, and the Console Skeleton](#phase-4-complete)
 - [Phase 5 — Complete: CI/CD Pipelines](#phase-5-complete)
-- Phase 6 — AKS + Helm + container policy (not started)
+- [Phase 6 — Complete: AKS + Helm + Real Deploys](#phase-6-complete)
 - Phase 7 — Entra SSO + client-credentials flow (not started)
 - Phase 8 — Foundry + Guardrails + APIM (not started)
 - Phase 9 — Private endpoints + Firewall + WAF + VPN Gateway (not started)
@@ -1549,3 +1549,94 @@ This repo is **public**. A self-hosted runner on a public repo is a real, not th
 
 **Q2: The ACR fix took three attempts — subject format, then RBAC, then network access — each looking like it should have been the last one. What's the general lesson for debugging a stack of independent failure layers like this?**
 > Fix one layer, then re-test against the *original* symptom, not your assumption about what's now working. Each fix in this chain was independently correct and independently necessary, but none of them was sufficient alone — a "should be fixed now" instinct after the first or second fix would have stopped short of the actual, deeper blocker. The tell that there's another layer underneath is the exact same class of error message persisting after a fix that should have addressed it.
+
+---
+
+<a id="phase-6-complete"></a>
+## Phase 6 — Complete: AKS + Helm + Real Deploys
+
+*This phase produced the highest density of genuinely subtle bugs of the whole project — several of them the kind that only show up once you actually try to run the thing for real, not from reading the Terraform. Read the whole addendum even if you think you know Kubernetes; most of what's valuable here isn't Kubernetes itself, it's the Azure-specific integration points around it.*
+
+### Concept
+
+**A cluster is two things wearing one name.** The **control plane** (API server, scheduler, etcd) is what you talk to and what makes decisions; on AKS it's entirely Azure-managed — `sku_tier = "Free"` in `infra/modules/aks/main.tf` means you pay nothing for it. The **node pool** is real, billable compute — VMs in a Scale Set that actually run your containers. Everything in this phase's cost discussion is about the node pool; the control plane is free regardless of size or usage.
+
+**Pods, Deployments, Services** — a Pod is the smallest schedulable unit (usually one container). A Deployment is a controller that keeps N copies of a Pod spec running, replacing any that die. A Service is a stable network name that always points at whichever Pods are currently healthy, so nothing else in the cluster has to track individual Pod IPs (which change every time a Pod is replaced).
+
+**Helm** templates a set of Kubernetes YAML files so the same chart can produce slightly different output per environment (different image tag, different namespace) without copy-pasting near-identical YAML. `values.yaml` holds what varies; `templates/*.yaml` hold `{{ .Values.x }}` placeholders Helm fills in at render time.
+
+**Workload Identity** is the third time this project uses the exact same OIDC-federation shape (after TFC and GitHub Actions): a Kubernetes ServiceAccount, annotated with an Azure identity's client ID, lets a Pod exchange its own Kubernetes-issued token for an Azure AD token — no secret ever mounted into the Pod.
+
+### What we built
+
+| Piece | Where | Notes |
+|---|---|---|
+| AKS cluster | `infra/modules/aks/main.tf` | Free control plane, 1x `Standard_D2ns_v6` node, Azure CNI, OIDC issuer + workload identity + Azure Policy add-on enabled |
+| API server IP restriction | same file, `api_server_access_profile` | Locked to the management VM's static public IP only |
+| Console Helm chart | `charts/console/` | Deployment + Service + ServiceAccount, pre-emptively Gatekeeper-compliant pod spec |
+| Workload identity federation | `infra/envs/dev/main.tf` | Two federated credentials — `system:serviceaccount:dev:cortex-console` and `...test:cortex-console` |
+| AKS RBAC | same file | Cluster Admin role granted to both the management VM's identity and the GitHub Actions identity |
+| ACR reachability from AI spoke | `infra/modules/keyvault/main.tf` | A second, spoke-scoped private endpoint + private DNS zone (not a shared one — see below) |
+| Self-hosted runner (CD deploy jobs) | `.github/workflows/services-cd.yml` | `deploy-dev`/`deploy-test` moved here — same reason as `build-and-push` in Phase 5 |
+| Real automated deploy | same file | `az aks get-credentials` + `helm upgrade --install --wait` on every merge |
+
+### The bugs, in the order they were actually hit
+
+**1. `Standard_B2s` isn't allowed in this subscription at all.** Same class of issue as the management VM's SKU back in Phase 3 — not a quota problem, a blanket subscription/region restriction. Azure's 400 response conveniently lists every allowed SKU; `Standard_D2ns_v6` (already proven working for the VM) was on it. Cost went from ~$0.04/hr to ~$0.09-0.10/hr — confirmed with a real tradeoff conversation before making the change, not assumed silently.
+
+**2. Three real Trivy findings on the cluster itself**, none suppressed:
+- `AZU-0041` (CRITICAL) — API server reachable from anywhere. Fixed by restricting `authorized_ip_ranges` to the management VM's static IP — the one place that's actually stable, unlike a dynamic home IP (the same constraint WireGuard's NSG rule already lives with).
+- `AZU-0042` (HIGH) — RBAC not explicitly enabled.
+- `AZU-0043` (HIGH) — no NetworkPolicy set.
+
+**3. A `git stash` push/pop silently dropped a line of working code.** While iterating on the Trivy fixes, an unrelated `acr_id` wiring line vanished from `module.iam`'s call block somewhere in a stash round-trip — caught only because the next `terraform plan` showed an unexpected `1 to destroy` (a previously-working AcrPush role assignment) instead of the expected clean diff. The lesson generalizes past this one incident: **an unexpected destroy in a plan is never something to explain away — it's something to stop and investigate**, because reasoning backward from "the plan looks wrong" caught a real, silent data-loss bug that would otherwise have shipped.
+
+**4. The management VM's identity could authenticate to Azure but had zero permission to *use* the cluster.** `az aks get-credentials` failed outright — Key Vault access is a data-plane **access policy**, completely separate from Azure **RBAC**, and the VM's identity had never been granted any RBAC role on the AKS cluster at all. Fixed with an explicit `Azure Kubernetes Service Cluster Admin Role` grant (Cluster Admin, not the narrower Cluster User, since this is a solo-operator POC cluster — same admin-bypass shape already used for branch protection).
+
+**5. `ImagePullBackOff` — a real `403 Forbidden` from ACR's own OAuth endpoint, not a timeout.** This is the richest bug of the phase. AKS nodes live in the **AI spoke**; ACR's only private endpoint was in the **sandbox spoke** — two different VNets with no direct route between them (hub-spoke topology only ever peers hub↔spoke, never spoke↔spoke). With no private DNS zone link for the AI spoke, nodes resolved ACR's **public** IP instead and got a clean, real rejection from Azure's gateway (public access is disabled) — not a network-level black hole like the earlier UDR bugs, a proper HTTP 403.
+
+The fix is *not* "add a second private endpoint pointing into the same shared DNS zone." Doing that would register a second A record for the same hostname in one zone linked to multiple VNets — DNS has no concept of "which VNet is asking," so the *already-working* sandbox spoke's resolution could start non-deterministically flipping between both private endpoints' IPs, breaking working access while fixing broken access. The correct pattern: **a separate private DNS zone with the identical name, in a different resource group** (Azure scopes zone uniqueness to name+resource-group, so this is fully legal), linked only to the AI spoke's own VNet. Two zone *resources*, same zone *name*, each fully isolated — no shared record set, no ambiguity, no risk to the sandbox spoke's setup.
+
+```mermaid
+graph TB
+    subgraph SANDBOX["Sandbox spoke"]
+        VM["management VM"]
+        PE1["pe-acr-cortex-dev<br/>(private endpoint)"]
+        Z1["privatelink.azurecr.io<br/>(zone in rg-cortex-management-dev)<br/>linked to: sandbox + hub"]
+        VM -.resolves via.-> Z1
+        Z1 -.-> PE1
+    end
+    subgraph AI["AI spoke"]
+        NODE["AKS node"]
+        PE2["pe-acr-ai-cortex-dev<br/>(separate private endpoint)"]
+        Z2["privatelink.azurecr.io<br/>(SEPARATE zone in rg-cortex-spoke-ai-dev)<br/>linked to: AI spoke only"]
+        NODE -.resolves via.-> Z2
+        Z2 -.-> PE2
+    end
+    ACR[("acrcortexvx54b<br/>(one registry)")]
+    PE1 --> ACR
+    PE2 --> ACR
+```
+
+**6. GitHub-hosted runners can't reach the AKS API server either — same root cause as the ACR push problem in Phase 5.** `deploy-dev`/`deploy-test` needed to move to the self-hosted runner too, for the same reason `build-and-push` did: the API server's `authorized_ip_ranges` restriction (from bug #2's fix) means nothing outside the VNet — including a GitHub-hosted runner — can reach it at all.
+
+**7. The approval gate silently didn't gate.** The very first real automated `deploy-test` run sailed through with zero pause, when the whole point of the `test` Environment's required-reviewer rule was to demonstrate a genuine human-approval step. The tell wasn't obvious from the workflow UI alone — it came from checking the GitHub *deployment's* own status history via the API: a real `waiting` state existed, but resolved to `queued` only **9 seconds** later, far too fast for an actual click. `can_admins_bypass` defaults to `true` when left unset in Terraform, meaning any repo admin — the only kind of person who was ever going to merge here — skips the required-reviewer wait automatically. Set explicitly to `false`.
+
+### Interview tips
+
+**Q: What's the difference between an Azure RBAC role and a Key Vault access policy, and why does it matter operationally?**
+> Key Vault (in its classic access-policy model, as used throughout this project) has its *own* permission system, entirely separate from Azure RBAC — granting a principal access to secrets there says nothing about what it can do anywhere else in Azure, including a resource that sits right next to it like an AKS cluster. This bit us directly: the management VM's identity could read secrets from Key Vault but had zero ability to even *fetch credentials* for a cluster in the same resource group, because those are two unrelated authorization systems that happen to both live under one Azure subscription.
+
+**Q: Why is "a second private endpoint into the same shared DNS zone" the wrong fix for cross-spoke private resource access, even though it looks like the obvious one?**
+> Because a private DNS zone's A records aren't scoped per-VNet even when the zone is linked to multiple VNets — every linked VNet's resolver sees the *same* record set. Adding a second endpoint's IP to a zone that's already correctly serving other clients doesn't add a new, isolated path; it makes the *existing* resolution non-deterministic for everyone, since DNS has no notion of network topology or "nearest" endpoint. The safe pattern for genuinely isolated per-spoke access is a separate zone *resource* (same name is fine, since Azure scopes uniqueness to name+resource-group) linked only to the VNet that needs it.
+
+**Q: The `403 Forbidden` from ACR and the earlier `CONNECTIVITY_REFRESH_TOKEN_ERROR` from Phase 5's GitHub Actions problem were both "can't reach private ACR" — why did one produce a clean HTTP error and the other something closer to a network timeout?**
+> Because they failed at different points in the same conceptual problem. The GitHub-hosted runner had no route to ACR's address space *at all* — a pure network-level failure, indistinguishable from a black hole. The AKS node, by contrast, successfully resolved and reached ACR's *public* endpoint (since it correctly fell back to public DNS with no private zone link) — the connection completed, and Azure's gateway then explicitly rejected it because public access is disabled. Same root cause (no private path), two different observable failure shapes, because "no route" and "wrong route" fail differently.
+
+### Comprehension check — asked and answered
+
+**Q1: Why did checking the actual GitHub deployment's status-history API (not just the workflow run UI) matter for catching the admin-bypass bug?**
+> The workflow UI just shows job success/failure — a bypassed approval and a genuinely-approved one look *identical* there, both just "succeeded." The deployment's own status history recorded the real sequence of events (`waiting` → `queued`, 9 seconds apart), which is the only place the timing evidence proving it was bypassed (rather than approved unusually fast) actually existed. When a control's *effect* looks right but you have reason to doubt the *mechanism*, look for the system that records the mechanism's own history, not just its outcome.
+
+**Q2: The stash-push/pop bug (dropping the `acr_id` line) was caught by an unexpected line in a `terraform plan`, not by any test or review. What made that catchable at all?**
+> Terraform's plan is fundamentally a diff against real, external state — it doesn't just check "does my code look right," it checks "does applying this code produce a result I didn't expect." A silently-dropped line that changes behavior will always show up as *some* diff in the next plan, even if the change itself was invisible in the file (a stash operation doesn't announce what it did). The habit this reinforces: never skip reading a plan's summary line just because you already know what you *meant* to change — the plan reports what would actually happen, not what you intended.
