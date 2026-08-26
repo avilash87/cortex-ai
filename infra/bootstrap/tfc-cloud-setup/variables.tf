@@ -16,6 +16,18 @@ variable "github_owner" {
   default     = "avilash87"
 }
 
+# GitHub's OIDC subject claim now includes this immutable numeric ID
+# (repo:owner@owner_id/repo@repo_id:...) alongside the login/repo name, to
+# stop a renamed account/repo from inheriting a stale federated credential's
+# trust. There's no Terraform data source for "look up a GitHub user's ID by
+# login" in this provider, so it's supplied directly - fetched once via
+# `gh api repos/avilash87/cortex-ai --jq '.owner.id'`.
+variable "github_owner_id" {
+  description = "Numeric GitHub user/org ID for var.github_owner - part of the OIDC subject claim"
+  type        = number
+  default     = 15866712
+}
+
 variable "github_repo_name" {
   description = "Repository name (without owner prefix)"
   type        = string
