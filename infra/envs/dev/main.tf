@@ -68,6 +68,21 @@ resource "azurerm_federated_identity_credential" "console_workload_identity" {
   subject             = "system:serviceaccount:dev:cortex-console"
 }
 
+# Lets the management VM's identity actually fetch and use cluster-admin
+# kubeconfig (`az aks get-credentials --admin`) - the VM is the one place
+# inside the API server's authorized_ip_ranges restriction, so it's where
+# any interactive kubectl/helm work has to happen. Cluster Admin (not just
+# Cluster User) because this is a solo-operator POC cluster, not
+# multi-tenant - same admin-bypass pattern already used for branch
+# protection. Wiring up Azure AD-integrated Kubernetes RBAC just to grant
+# narrower in-cluster permissions is real production hardening, not done
+# here.
+resource "azurerm_role_assignment" "management_vm_aks_admin" {
+  scope                = module.aks.cluster_id
+  role_definition_name = "Azure Kubernetes Service Cluster Admin Role"
+  principal_id         = module.keyvault.management_vm_identity_principal_id
+}
+
 # Overridable without a code change: uksouth capacity for popular B/D-series SKUs
 # fluctuates. If a plan fails with SkuNotAvailable, set this as a TFC workspace
 # variable to a different size (e.g. Standard_A2_v2, Standard_F2s_v2) and re-run.
