@@ -9,8 +9,15 @@ on:
       - ".github/workflows/services-cd.yml"
 
 permissions:
-  id-token: write # required for OIDC federation to Azure - no stored secret
+  id-token: write # required for OIDC federation to Azure
   contents: read
+
+# AZURE_CLIENT_ID/TENANT_ID/SUBSCRIPTION_ID are non-sensitive identifiers,
+# not credentials - stored as repo secrets anyway to avoid hardcoding
+# infra-specific values into workflow YAML. The actual authentication is
+# still OIDC (azure/login exchanges a GitHub-issued token for an Azure one
+# via the federated credential) - no client secret or password is stored
+# anywhere.
 
 jobs:
   # Attached to the `dev` GitHub Environment (not just a build step) because
@@ -29,9 +36,9 @@ jobs:
       - name: Azure login (OIDC)
         uses: azure/login@v2
         with:
-          client-id: 36306891-c853-4aa8-a7fc-0df4769cb4f5
-          tenant-id: defb61e5-4371-44ea-a638-4b01018530d5
-          subscription-id: 5e131d1f-220b-4c15-a3b0-4d0009629b75
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: ACR login
         run: az acr login --name acrcortexvx54b
@@ -61,9 +68,9 @@ jobs:
       - name: Azure login (OIDC) - proves the dev environment's federated credential works
         uses: azure/login@v2
         with:
-          client-id: 36306891-c853-4aa8-a7fc-0df4769cb4f5
-          tenant-id: defb61e5-4371-44ea-a638-4b01018530d5
-          subscription-id: 5e131d1f-220b-4c15-a3b0-4d0009629b75
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - run: |
           echo "Image acrcortexvx54b.azurecr.io/cortex-console:${{ github.sha }} is in ACR."
@@ -84,9 +91,9 @@ jobs:
       - name: Azure login (OIDC) - proves the test environment's federated credential works
         uses: azure/login@v2
         with:
-          client-id: 36306891-c853-4aa8-a7fc-0df4769cb4f5
-          tenant-id: defb61e5-4371-44ea-a638-4b01018530d5
-          subscription-id: 5e131d1f-220b-4c15-a3b0-4d0009629b75
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - run: |
           echo "Reached deploy-test - the required manual approval on the test Environment was granted."
