@@ -69,3 +69,11 @@ variable "spoke_address_spaces" {
     sandbox = ["10.3.0.0/16"]
   }
 }
+
+# Defaults false - see the resolver's own comment in main.tf. Turned off
+# 2026-09-02 after it turned out to be ~59% of a month's total project
+# spend, running continuously with no stop/start of its own.
+variable "create_dns_resolver" {
+  type    = bool
+  default = false
+}

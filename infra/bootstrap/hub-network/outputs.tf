@@ -17,6 +17,6 @@ output "management_rg_name" {
 }
 
 output "dns_resolver_inbound_ip" {
-  description = "Set as custom DNS server on spoke VNets and WireGuard client DNS"
-  value       = azurerm_private_dns_resolver_inbound_endpoint.hub.ip_configurations[0].private_ip_address
+  description = "Set as custom DNS server on spoke VNets and WireGuard client DNS - null when var.create_dns_resolver is false"
+  value       = var.create_dns_resolver ? azurerm_private_dns_resolver_inbound_endpoint.hub[0].ip_configurations[0].private_ip_address : null
 }
