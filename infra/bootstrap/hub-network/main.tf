@@ -128,8 +128,17 @@ resource "azurerm_virtual_network_peering" "spoke_to_hub" {
 # DNS PRIVATE RESOLVER
 # Centralised in the hub so every spoke resolves private endpoint names to
 # private IPs without each spoke needing its own resolver or DNS zone links.
+#
+# Gated behind var.create_dns_resolver (default false) - unlike a VM or AKS,
+# this resource has no stop/start, only exists/doesn't: it billed ~£0.25/hr
+# continuously (empirically, via Cost Management - not a spec-sheet number)
+# regardless of whether WireGuard was actually in use, and turned out to be
+# ~59% of a month's total spend on this project. Set true + terraform apply
+# only for the specific study sessions that actually need WireGuard's
+# private DNS resolution (Phase 4) - not left on by default.
 # ============================================================================
 resource "azurerm_private_dns_resolver" "hub" {
+  count               = var.create_dns_resolver ? 1 : 0
   name                = "dnspr-hub-cortex-dev"
   resource_group_name = azurerm_resource_group.hub.name
   location            = azurerm_resource_group.hub.location
@@ -138,8 +147,9 @@ resource "azurerm_private_dns_resolver" "hub" {
 }
 
 resource "azurerm_private_dns_resolver_inbound_endpoint" "hub" {
+  count                   = var.create_dns_resolver ? 1 : 0
   name                    = "ep-inbound"
-  private_dns_resolver_id = azurerm_private_dns_resolver.hub.id
+  private_dns_resolver_id = azurerm_private_dns_resolver.hub[0].id
   location                = azurerm_resource_group.hub.location
   tags                    = var.tags
 
@@ -182,8 +192,15 @@ resource "azurerm_consumption_budget_subscription" "poc" {
   time_grain = "Monthly"
 
   time_period {
-    # timestamp() returns "2026-08-24T..." — substr gives "2026-08", then we pin to the 1st
-    start_date = "${substr(timestamp(), 0, 7)}-01T00:00:00Z"
+    # Fixed, not timestamp()-derived: time_grain = "Monthly" already makes
+    # Azure roll the evaluation window over every month on its own -
+    # start_date only needs to be a stable anchor point (this budget's
+    # actual creation month), not "the current month" recomputed on every
+    # plan. The original timestamp()-based version forced a replace every
+    # time a plan ran in a new calendar month than the resource was last
+    # applied in - discovered when August rolled into September mid-session
+    # and a plan for an unrelated change suddenly wanted to replace this too.
+    start_date = "2026-08-01T00:00:00Z"
   }
 
   notification {
